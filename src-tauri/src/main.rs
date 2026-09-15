@@ -823,6 +823,16 @@ async fn get_canvas_videos(course_id: i64) -> Result<Vec<CanvasVideo>> {
 }
 
 #[tauri::command]
+async fn list_video_space_courses() -> Result<Vec<Course>> {
+    APP.list_video_space_courses().await
+}
+
+#[tauri::command]
+async fn get_video_space_videos(teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
+    APP.get_video_space_videos(teaching_class_id).await
+}
+
+#[tauri::command]
 async fn login_canvas_website() -> Result<()> {
     APP.login_canvas_website().await
 }
@@ -1058,6 +1068,8 @@ async fn main() -> Result<()> {
             express_login,
             get_subjects,
             get_canvas_videos,
+            list_video_space_courses,
+            get_video_space_videos,
             login_canvas_website,
             check_extra_login_status,
             get_video_course,

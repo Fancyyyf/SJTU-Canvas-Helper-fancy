@@ -20,8 +20,8 @@ use crate::{
     },
     error::{AppError, Result},
     model::{
-        CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody,
-        ItemPage, ProgressPayload, Subject, VideoCourse, VideoInfo, VideoPlayInfo,
+        CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody, Course,
+        ItemPage, ProgressPayload, Subject, Teacher, Term, VideoCourse, VideoInfo, VideoPlayInfo,
     },
     utils::{self, file::get_file_name, file::write_file_at_offset, time::format_time},
 };
@@ -46,6 +46,55 @@ use tokio::{sync::Mutex, task::JoinSet};
 
 const RESOURCE_MANAGE_BASE_URL: &str = "https://v.sjtu.edu.cn/jy-application-resourcemanage";
 const RESOURCE_MANAGE_UI_URL: &str = "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/";
+const VIDEO_SPACE_LAUNCH_URL: &str =
+    "https://oc.sjtu.edu.cn/accounts/1/external_tools/3136?launch_type=global_navigation";
+
+// These IDs belong to the video service, not Canvas. Keep this list separate.
+fn video_space_courses_from_response(value: &Value) -> Result<Vec<Course>> {
+    let records = api_data(value)?
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::VideoDownloadError("Video course list is missing records".into())
+        })?;
+    records
+        .iter()
+        .map(|record| {
+            let id = value_as_i64(record.get("teclId"))
+                .filter(|id| *id > 0)
+                .ok_or_else(|| {
+                    AppError::VideoDownloadError("Video course is missing teaching class id".into())
+                })?;
+            Ok(Course {
+                id,
+                name: first_string(record, &["subjName", "teclName"]),
+                course_code: first_string(record, &["courseNo", "teclCode"]),
+                teachers: record
+                    .get("teacNames")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|name| Teacher {
+                        display_name: name.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                term: Term {
+                    id: value_as_i64(record.get("acteId")).unwrap_or_default(),
+                    name: format!(
+                        "{}-{} 第{}学期",
+                        first_string(record, &["acyeBeginYear"]),
+                        first_string(record, &["acyeEndYear"]),
+                        first_string(record, &["acteName"])
+                    ),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        })
+        .collect()
+}
 
 fn value_as_i64(value: Option<&Value>) -> Option<i64> {
     value.and_then(|value| {
@@ -472,6 +521,101 @@ impl Client {
         self.get_page_items(&url).await
     }
 
+    async fn get_video_space_token(&self) -> Result<String> {
+        self.get_video_space_token_from_url(VIDEO_SPACE_LAUNCH_URL)
+            .await
+    }
+
+    async fn get_video_space_token_from_url(&self, launch_url: &str) -> Result<String> {
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .cookie_provider(self.jar.clone())
+            .build()?;
+        let mut request = client.get(launch_url);
+        for _ in 0..16 {
+            let response = request.send().await?.error_for_status()?;
+            let base = response.url().clone();
+            if base.domain() == Some("jaccount.sjtu.edu.cn") {
+                return Err(AppError::LoginError);
+            }
+            if let Some(location) = response.headers().get("location") {
+                let next = base
+                    .join(location.to_str()?)
+                    .map_err(|_| AppError::LoginError)?;
+                if let Some(token) = jwt_token_from_location(next.as_str()) {
+                    return Ok(token);
+                }
+                request = client.get(next);
+                continue;
+            }
+            let body = response.text().await?;
+            let document = Document::from(body.as_str());
+            let embedded_token = document
+                .find(Name("iframe"))
+                .filter_map(|node| node.attr("src"))
+                .find_map(jwt_token_from_location);
+            if let Some(token) = embedded_token {
+                return Ok(token);
+            }
+            let (action, data) = self.get_form_submission_from_doc(document)?;
+            request = client
+                .post(self.resolve_form_action(&base, &action)?)
+                .form(&data);
+        }
+        Err(AppError::VideoDownloadError(
+            "Video space login did not finish".into(),
+        ))
+    }
+
+    pub async fn list_video_space_courses(&self) -> Result<Vec<Course>> {
+        let token = self.get_video_space_token().await?;
+        let mut courses = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in 1..=1000 {
+            let response = self
+                .cli
+                .get(format!(
+                    "{RESOURCE_MANAGE_BASE_URL}/v1/group_subject_vod_list/t-1"
+                ))
+                .header("jwt-token", &token)
+                .header(REFERER, RESOURCE_MANAGE_UI_URL)
+                .query(&[
+                    ("page.pageIndex", page.to_string()),
+                    ("page.pageSize", "100".into()),
+                    ("page.orders[0].asc", "false".into()),
+                    ("page.orders[0].field", "updateTime".into()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?;
+            let value: Value = response.json().await?;
+            let batch = video_space_courses_from_response(&value)?;
+            let empty = batch.is_empty();
+            let previous_len = courses.len();
+            courses.extend(batch.into_iter().filter(|course| seen.insert(course.id)));
+            let total = value_as_i64(api_data(&value)?.get("rowCount"));
+            if empty || total.is_some_and(|total| courses.len() as i64 >= total) {
+                *self.token.write().await = token;
+                return Ok(courses);
+            }
+            if previous_len == courses.len() {
+                return Err(AppError::VideoDownloadError(
+                    "Video course pagination made no progress".into(),
+                ));
+            }
+        }
+        Err(AppError::VideoDownloadError(
+            "Video course pagination limit reached".into(),
+        ))
+    }
+
+    pub async fn get_video_space_videos(&self, teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
+        let token = self.get_video_space_token().await?;
+        *self.token.write().await = token.clone();
+        self.get_videos_for_teaching_class(teaching_class_id, token)
+            .await
+    }
+
     fn get_form_submission_from_doc(
         &self,
         document: Document,
@@ -580,6 +724,15 @@ impl Client {
     pub async fn get_canvas_videos(&self, course_id: i64) -> Result<Vec<CanvasVideo>> {
         let (teaching_class_id, token) = self.get_teaching_class_id_token(course_id).await?;
         *self.token.write().await = token.to_owned();
+        self.get_videos_for_teaching_class(teaching_class_id, token)
+            .await
+    }
+
+    async fn get_videos_for_teaching_class(
+        &self,
+        teaching_class_id: i64,
+        token: String,
+    ) -> Result<Vec<CanvasVideo>> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/subject_vod_list_new");
         let resp = self
             .cli
@@ -976,6 +1129,59 @@ mod tests {
     use super::*;
     use crate::client::constants::BASE_URL;
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
+
+    #[test]
+    fn test_video_space_courses_use_teaching_class_ids() {
+        let courses = video_space_courses_from_response(&serde_json::json!({
+            "status": 200, "data": { "rowCount": 2, "records": [
+                {"id": 7, "teclId": "910", "subjName": "测试课程甲",
+                 "teacNames": ["测试教师甲"], "acyeBeginYear": 2098, "acyeEndYear": 2099,
+                 "acteName": "一", "acteId": 42},
+                {"teclId": 911, "subjName": "测试课程乙"}
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(courses.len(), 2);
+        assert_eq!(courses[0].id, 910);
+        assert_eq!(courses[0].teachers[0].display_name, "测试教师甲");
+        assert_eq!(courses[0].term.name, "2098-2099 第一学期");
+        assert_eq!(courses[1].name, "测试课程乙");
+        assert!(video_space_courses_from_response(&serde_json::json!({
+            "data": {"records": [{"id": 7}]}
+        }))
+        .is_err());
+        assert!(video_space_courses_from_response(&serde_json::json!({
+            "status": 401, "message": "expired"
+        }))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_video_space_login_forms_and_redirect() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let launch = server.mock(|when, then| {
+            when.method(GET).path("/launch");
+            then.status(200).body(
+                r#"<form action="/sso" method="post"><input name="launch" value="test"></form>"#,
+            );
+        });
+        let sso = server.mock(|when, then| {
+            when.method(POST).path("/sso").body("launch=test");
+            then.status(302)
+                .header("Location", "/ui/#/?jwt_token=test%2Btoken");
+        });
+        let client = Client::new_without_proxy(server.base_url().as_str(), "", "", "", None);
+        assert_eq!(
+            client
+                .get_video_space_token_from_url(&server.url("/launch"))
+                .await
+                .unwrap(),
+            "test+token"
+        );
+        launch.assert();
+        sso.assert();
+    }
 
     #[tokio::test]
     async fn test_get_uuid() -> Result<()> {

@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use super::App;
 use crate::{
     error::{AppError, Result},
-    model::{CanvasVideo, ProgressPayload, Subject, VideoCourse, VideoInfo, VideoPlayInfo},
+    model::{CanvasVideo, Course, ProgressPayload, Subject, VideoCourse, VideoInfo, VideoPlayInfo},
 };
 // Apis for course video
 impl App {
@@ -54,6 +54,14 @@ impl App {
 
     pub async fn get_subjects(&self) -> Result<Vec<Subject>> {
         self.client.get_subjects().await
+    }
+
+    pub async fn list_video_space_courses(&self) -> Result<Vec<Course>> {
+        self.client.list_video_space_courses().await
+    }
+
+    pub async fn get_video_space_videos(&self, teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
+        self.client.get_video_space_videos(teaching_class_id).await
     }
 
     pub async fn get_video_info(&self, video_id: i64) -> Result<VideoInfo> {

@@ -31,7 +31,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DraggableData, DraggableEvent } from "react-draggable";
 import Draggable from "react-draggable";
 import { Link as RouterLink } from "react-router-dom";
@@ -49,11 +49,13 @@ import { WorkspaceHero } from "../components/workspace_hero";
 import videoStyles from "../css/video_player.module.css";
 import { getConfig, saveConfig } from "../lib/config";
 import { VIDEO_PAGE_HINT_ALERT_KEY } from "../lib/constants";
-import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
+import { useCourses } from "../lib/hooks";
+import { compareVideoCourses, loadVideoCourse, mergeVideoCourses } from "../lib/video_courses";
 import { useAppMessage } from "../lib/message";
 import { useTauriEvent } from "../lib/events";
 import {
   CanvasVideo,
+  Course,
   DownloadTask,
   LLMChatMessage,
   LOG_LEVEL_ERROR,
@@ -87,14 +89,31 @@ export default function VideoPage() {
   const [videoDownloadTasks, setVideoDownloadTasks] = useState<VideoDownloadTask[]>([]);
   const [pptDownloadTasks, setPPTDownloadTasks] = useState<DownloadTask[]>([]);
   const [operating, setOperating] = useState(false);
-  const courses = useCourses();
+  const canvasCourses = useCourses();
+  const [spaceCourses, setSpaceCourses] = useState<Course[]>([]);
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [coursesError, setCoursesError] = useState("");
+  const [courseRefresh, setCourseRefresh] = useState(0);
+  const mergedCourses = useMemo(() => mergeVideoCourses(canvasCourses.data, spaceCourses), [canvasCourses.data, spaceCourses]);
+  const courses = { data: mergedCourses };
   const [messageApi, contextHolder] = useAppMessage();
   const [plays, setPlays] = useState<VideoPlayInfo[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<CanvasVideo | undefined>();
-  const { selectedCourseId, setSelectedCourseId } = useSelectedCourse();
+  const [selectedCourseId, setSelectedCourseId] = useState(-1);
   const [videos, setVideos] = useState<CanvasVideo[]>([]);
   const [notLogin, setNotLogin] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!loaded || notLogin) return;
+    let cancelled = false;
+    setCoursesLoading(true);
+    setCoursesError("");
+    invoke<Course[]>("list_video_space_courses")
+      .then((data) => { if (!cancelled) setSpaceCourses(data); })
+      .catch((error) => { if (!cancelled) setCoursesError(String(error)); })
+      .finally(() => { if (!cancelled) setCoursesLoading(false); });
+    return () => { cancelled = true; };
+  }, [loaded, notLogin, courseRefresh]);
   const [playURLs, setPlayURLs] = useState<string[]>([]);
   const [mainPlayURL, setMainPlayURL] = useState("");
   const [mutedPlayURL, setMutedPlayURL] = useState("");
@@ -260,14 +279,9 @@ export default function VideoPage() {
     setPlays([]);
     setMainPlayURL("");
     setMutedPlayURL("");
-    await handleGetVideos(selected);
+    if (selected !== -1) await handleGetVideos(selected);
     setOperating(false);
   };
-
-  useAutoLoadCourse(
-    (courseId) => void handleSelectCourse(courseId),
-    courses.data.length > 0
-  );
 
   const handleGetVideoInfo = async (video: CanvasVideo) => {
     if (!video.playable) {
@@ -310,9 +324,13 @@ export default function VideoPage() {
 
   const handleGetVideos = async (courseId: number) => {
     try {
-      const nextVideos = (await invoke("get_canvas_videos", {
-        courseId,
-      })) as CanvasVideo[];
+      const course = mergedCourses.find((item) => item.id === courseId);
+      if (!course) return;
+      const nextVideos = await loadVideoCourse(
+        course,
+        (id) => invoke<CanvasVideo[]>("get_canvas_videos", { courseId: id }),
+        (id) => invoke<CanvasVideo[]>("get_video_space_videos", { teachingClassId: id }),
+      );
       setVideos(nextVideos);
     } catch (error) {
       messageApi.error(`获取录像时发生了错误：${error}`);
@@ -830,11 +848,28 @@ export default function VideoPage() {
                 alignSelf: { xs: "stretch", lg: "flex-start" },
                 }}
               >
-                <CourseSelect
-                  courses={courses.data}
-                  onChange={(courseId) => setSelectedCourseId(courseId)}
-                  value={selectedCourseId > 0 ? selectedCourseId : undefined}
-                />
+                <Stack spacing={1.5}>
+                  <CourseSelect
+                    courses={courses.data}
+                    compareCourses={compareVideoCourses}
+                    disabled={operating || coursesLoading || canvasCourses.isLoading}
+                    onChange={(courseId) => void handleSelectCourse(courseId)}
+                    value={selectedCourseId !== -1 ? selectedCourseId : undefined}
+                    getSourceLabel={(course) => mergedCourses.find((item) => item.id === course.id)?.sourceLabel}
+                  />
+                    <>
+                      {coursesLoading && <Typography variant="body2">正在读取视频空间课程…</Typography>}
+                      {coursesError && <Alert severity="warning">获取视频空间课程失败：{coursesError}。仍可选择 Canvas 课程，或刷新重试。</Alert>}
+                      {!coursesLoading && !coursesError && courses.data.length === 0 && (
+                        <Alert severity="info">暂无可用课程。</Alert>
+                      )}
+                      <Button disabled={operating || coursesLoading || canvasCourses.isLoading} onClick={() => {
+                        void handleSelectCourse(-1);
+                        setCourseRefresh((value) => value + 1);
+                        void canvasCourses.mutate();
+                      }}>刷新课程</Button>
+                    </>
+                </Stack>
               </Box>
             ) : undefined
           }
