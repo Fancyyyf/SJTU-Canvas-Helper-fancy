@@ -1315,6 +1315,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_get_me() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1326,6 +1327,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_list_courses() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1347,6 +1349,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_list_assignments() -> Result<()> {
         tracing_subscriber::fmt::init();
         let token = get_token_from_env();
@@ -1372,6 +1375,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_list_users() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1405,6 +1409,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_list_submissions() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1432,6 +1437,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
     async fn test_list_colors() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());

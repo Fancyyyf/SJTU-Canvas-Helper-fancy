@@ -991,13 +991,16 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use super::*;
     use crate::client::constants::BASE_URL;
+    use httpmock::prelude::*;
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
+    use uuid::Uuid;
 
     #[tokio::test]
+    #[ignore = "requires access to the live jAccount login service"]
     async fn test_get_uuid() -> Result<()> {
         let cli = Client::default();
         let uuid = cli.get_uuid().await?;
@@ -1007,36 +1010,45 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "macOS system-configuration panics in CI/local test env"
-    )]
     #[tokio::test]
     async fn test_download_video() -> Result<()> {
+        const VIDEO_BODY: &str = "mock video payload";
+
+        struct TestOutput(PathBuf);
+
+        impl Drop for TestOutput {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
         let _ = tracing_subscriber::fmt::try_init();
+        let server = MockServer::start();
+        let video_mock = server.mock(|when, then| {
+            when.method(GET).path("/video.mp4");
+            then.status(200)
+                .header("Content-Type", "video/mp4")
+                .header("Content-Length", "18")
+                .body(VIDEO_BODY);
+        });
         let cli = Arc::new(Client::new_without_proxy(BASE_URL, "", "", "", None));
-        let video_url = "https://www.w3schools.com/html/mov_bbb.mp4";
-        let save_path = "test_download_video.mp4";
+        let video_url = server.url("/video.mp4");
+        let output = TestOutput(
+            std::env::temp_dir().join(format!("canvas-video-test-{}.mp4", Uuid::new_v4())),
+        );
+        let save_path = output.0.to_string_lossy().into_owned();
         let video_info = VideoPlayInfo {
-            rtmp_url_hdv: video_url.to_owned(),
+            rtmp_url_hdv: video_url,
             ..Default::default()
         };
         let cli_cloned = cli.clone();
         cli_cloned
-            .download_video(&video_info, save_path, |_| {})
+            .download_video(&video_info, &save_path, |_| {})
             .await?;
 
-        // download original video
-        let original = cli
-            .get_request(video_url, None::<&str>)
-            .await?
-            .bytes()
-            .await?
-            .to_vec();
-
-        let downloaded = fs::read(save_path)?;
-        assert_eq!(original, downloaded);
-        let _ = fs::remove_file(save_path);
+        let downloaded = fs::read(&save_path)?;
+        assert_eq!(VIDEO_BODY.as_bytes(), downloaded);
+        video_mock.assert_hits(2);
         Ok(())
     }
 

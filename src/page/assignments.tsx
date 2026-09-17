@@ -33,17 +33,17 @@ import {
   Typography,
 } from "@mui/material";
 import dayjs from "dayjs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import CourseSelect from "../components/course_select";
+import CourseSelect, { ALL_COURSES_ID } from "../components/course_select";
 import { GradeOverviewChart } from "../components/grade_overview";
 import BasicLayout from "../components/layout";
 import { WorkspaceHero } from "../components/workspace_hero";
 import { ListSkeleton } from "../components/skeleton";
 import ModifyDDLModal from "../components/modify_ddl_modal";
 import { SubmitModal } from "../components/submit_modal";
-import { useBaseURL, useCourses, useMe, usePreview, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
+import { useBaseURL, useCourses, useMe, usePreview, useSelectedCourse } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
 import {
   Assignment,
@@ -69,7 +69,8 @@ export default function AssignmentsPage() {
   const [operating, setOperating] = useState(false);
   const [onlyShowUnfinished, setOnlyShowUnfinished] = useState(true);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
-  const { selectedCourseId, setSelectedCourseId } = useSelectedCourse();
+  const { setSelectedCourseId } = useSelectedCourse();
+  const [courseScopeId, setCourseScopeId] = useState(ALL_COURSES_ID);
   const { previewer, onHoverEntry, onLeaveEntry, setPreviewEntry } =
     usePreview();
   const [linksMap, setLinksMap] = useState<Record<number, Attachment[]>>({});
@@ -85,6 +86,7 @@ export default function AssignmentsPage() {
     Assignment | undefined
   >();
   const [gradeMap, setGradeMap] = useState<Map<number, GradeStatus>>(new Map());
+  const assignmentLoadIdRef = useRef(0);
   const [searchParams, setSearchParams] = useSearchParams();
   const courses = useCourses();
   const me = useMe();
@@ -94,6 +96,7 @@ export default function AssignmentsPage() {
     const courseId = Number.parseInt(searchParams.get("id") ?? "");
     if (courseId > 0) {
       setSearchParams({});
+      setCourseScopeId(courseId);
       setSelectedCourseId(courseId);
     }
   }, [searchParams, setSearchParams, setSelectedCourseId]);
@@ -154,24 +157,72 @@ export default function AssignmentsPage() {
     courseId: number,
     onlyShowUnfinishedValue: boolean
   ) => {
-    if (courseId === -1) {
+    const requestId = ++assignmentLoadIdRef.current;
+    const courseIds =
+      courseId === ALL_COURSES_ID
+        ? courses.data.map((course) => course.id)
+        : courses.data.some((course) => course.id === courseId)
+          ? [courseId]
+          : [];
+    if (courseIds.length === 0) {
+      setAssignments([]);
+      setLinksMap({});
+      setOperating(false);
       return;
     }
     setOperating(true);
     try {
       const nextLinksMap: Record<number, Attachment[]> = {};
-      let nextAssignments = (await invoke("list_course_assignments", {
-        courseId,
-      })) as Assignment[];
-      nextAssignments = nextAssignments.map((assignment) => ({
-        ...assignment,
-        key: assignment.id,
-      }));
-      if (!isTAOrTeacher(courseId) && onlyShowUnfinishedValue) {
-        nextAssignments = nextAssignments.filter(
-          (assignment) =>
-            assignment.submission?.workflow_state === "unsubmitted"
-        );
+      const results = await Promise.allSettled(
+        courseIds.map(async (currentCourseId) => {
+          let courseAssignments = (await invoke("list_course_assignments", {
+            courseId: currentCourseId,
+          })) as Assignment[];
+          courseAssignments = courseAssignments.map((assignment) => ({
+            ...assignment,
+            course_id: assignment.course_id || currentCourseId,
+            key: assignment.id,
+          }));
+          if (!isTAOrTeacher(currentCourseId) && onlyShowUnfinishedValue) {
+            courseAssignments = courseAssignments.filter(
+              (assignment) => assignment.submission?.workflow_state === "unsubmitted"
+            );
+          }
+          return courseAssignments;
+        })
+      );
+      const nextAssignments = results
+        .filter(
+          (result): result is PromiseFulfilledResult<Assignment[]> =>
+            result.status === "fulfilled"
+        )
+        .flatMap((result) => result.value)
+        .sort((a, b) => {
+          const aDue = dayjs(a.due_at).valueOf();
+          const bDue = dayjs(b.due_at).valueOf();
+          return (Number.isFinite(aDue) ? aDue : Number.MAX_SAFE_INTEGER) -
+            (Number.isFinite(bDue) ? bDue : Number.MAX_SAFE_INTEGER);
+        });
+      const failedCount = results.filter((result) => result.status === "rejected").length;
+      if (requestId !== assignmentLoadIdRef.current) return;
+      if (failedCount > 0) {
+        messageApi.open({
+          type: "warning",
+          content: `${failedCount} 门课程的作业加载失败，已展示其余课程。`,
+          diagnostic: {
+            code: "ASSIGNMENTS.PARTIAL_LOAD",
+            scope: "assignments",
+            action: "load_course_scope",
+            outcome: "fallback",
+            recoverable: true,
+            fallback: {
+              used: true,
+              strategy: "show_successful_courses",
+              result: "success",
+            },
+            context: { failedCount, requestedCourseCount: courseIds.length },
+          },
+        });
       }
       nextAssignments.forEach((assignment) =>
         dealWithDescription(assignment, nextLinksMap)
@@ -180,9 +231,10 @@ export default function AssignmentsPage() {
       setAssignments(nextAssignments);
       setExpandedAssignmentIds([]);
     } catch (error) {
+      if (requestId !== assignmentLoadIdRef.current) return;
       messageApi.error(error as string);
     }
-    setOperating(false);
+    if (requestId === assignmentLoadIdRef.current) setOperating(false);
   };
 
   const handleDownloadAttachment = async (attachment: Attachment) => {
@@ -196,26 +248,37 @@ export default function AssignmentsPage() {
   };
 
   const handleCourseSelect = (courseId: number) => {
+    if (courseId === ALL_COURSES_ID) {
+      setCourseScopeId(ALL_COURSES_ID);
+      return;
+    }
     const selectedCourse = courses.data.find((course) => course.id === courseId);
     if (!selectedCourse) {
       return;
     }
+    setCourseScopeId(courseId);
     setSelectedCourseId(courseId);
   };
 
-  useAutoLoadCourse(
-    (courseId) => {
-      void handleGetAssignments(courseId, onlyShowUnfinished);
-    },
-    courses.data.length > 0
-  );
+  const courseScopeKey = courses.data.map((course) => course.id).join(",");
+  useEffect(() => {
+    if (
+      courseScopeId !== ALL_COURSES_ID &&
+      !courses.data.some((course) => course.id === courseScopeId)
+    ) {
+      setCourseScopeId(ALL_COURSES_ID);
+      return;
+    }
+    void handleGetAssignments(courseScopeId, onlyShowUnfinished);
+    // Reload when the global term changes the available course IDs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseScopeId, courseScopeKey, onlyShowUnfinished]);
 
-  const handleSetOnlyShowUnfinished = async (
+  const handleSetOnlyShowUnfinished = (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
     const nextValue = event.target.checked;
     setOnlyShowUnfinished(nextValue);
-    await handleGetAssignments(selectedCourseId, nextValue);
   };
 
   const dealWithDescription = (
@@ -262,7 +325,9 @@ export default function AssignmentsPage() {
         assignmentId,
       })) as Submission;
       const nextAssignments = assignments.map((assignment) =>
-        assignment.id === assignmentId ? { ...assignment, submission } : assignment
+        assignment.id === assignmentId && assignment.course_id === courseId
+          ? { ...assignment, submission }
+          : assignment
       );
       setAssignments(nextAssignments);
     } catch (error) {
@@ -273,16 +338,17 @@ export default function AssignmentsPage() {
 
   const handleDeleteComment = async (
     commentId: number,
-    assignmentId: number
+    assignmentId: number,
+    courseId: number
   ) => {
     try {
       await invoke("delete_my_submission_comment", {
-        courseId: selectedCourseId,
+        courseId,
         assignmentId,
         commentId,
       });
       messageApi.success("删除成功", 0.5);
-      await handleGetMySingleSubmission(selectedCourseId, assignmentId);
+      await handleGetMySingleSubmission(courseId, assignmentId);
     } catch (error) {
       consoleLog(LOG_LEVEL_ERROR, error);
       messageApi.error(error as string);
@@ -296,8 +362,8 @@ export default function AssignmentsPage() {
       return;
     }
     setExpandedAssignmentIds((prev) => [...prev, assignment.id]);
-    if (!isTAOrTeacher(selectedCourseId)) {
-      await handleGetMySingleSubmission(selectedCourseId, assignment.id);
+    if (!isTAOrTeacher(assignment.course_id)) {
+      await handleGetMySingleSubmission(assignment.course_id, assignment.id);
     }
   };
 
@@ -437,7 +503,7 @@ export default function AssignmentsPage() {
   };
 
   const selectedCourse = courses.data.find(
-    (course) => course.id === selectedCourseId
+    (course) => course.id === courseScopeId
   );
 
   return (
@@ -450,20 +516,20 @@ export default function AssignmentsPage() {
           assignment={assignmentToModify}
           handleCancel={() => setShowModifyDDLModal(false)}
           onRefresh={() =>
-            void handleGetAssignments(selectedCourseId, onlyShowUnfinished)
+            void handleGetAssignments(courseScopeId, onlyShowUnfinished)
           }
           onSuccess={() => {
             setShowModifyDDLModal(false);
-            void handleGetAssignments(selectedCourseId, onlyShowUnfinished);
+            void handleGetAssignments(courseScopeId, onlyShowUnfinished);
           }}
-          courseId={selectedCourseId}
+          courseId={assignmentToModify.course_id}
         />
       ) : null}
       {selectedAssignment ? (
         <SubmitModal
           open={showModal}
           allowed_extensions={selectedAssignment.allowed_extensions}
-          courseId={selectedCourseId}
+          courseId={selectedAssignment.course_id}
           assignmentId={selectedAssignment.id}
           onCancel={() => setShowModal(false)}
           onSubmit={() => {
@@ -471,7 +537,7 @@ export default function AssignmentsPage() {
             setSelectedAssignment(undefined);
             messageApi.success("提交成功", 0.5);
             void handleGetMySingleSubmission(
-              selectedCourseId,
+              selectedAssignment.course_id,
               selectedAssignment.id
             );
           }}
@@ -495,7 +561,8 @@ export default function AssignmentsPage() {
                 onChange={(courseId) => void handleCourseSelect(courseId)}
                 disabled={operating}
                 courses={courses.data}
-                value={selectedCourseId === -1 ? undefined : selectedCourseId}
+                includeAllOption
+                value={courseScopeId}
               />
             </Box>
           }
@@ -512,7 +579,7 @@ export default function AssignmentsPage() {
               justifyContent="space-between"
               spacing={2}
             >
-              {!isTAOrTeacher(selectedCourseId) ? (
+              {courseScopeId === ALL_COURSES_ID || !isTAOrTeacher(courseScopeId) ? (
                 <FormControlLabel
                   control={
                     <Checkbox
@@ -528,7 +595,14 @@ export default function AssignmentsPage() {
               ) : (
                 <Chip label="教师 / 助教模式" color="primary" variant="outlined" />
               )}
-              {selectedCourse ? (
+              {courseScopeId === ALL_COURSES_ID ? (
+                <Chip
+                  icon={<CalendarMonthRoundedIcon />}
+                  label={`当前学期全部课程（${courses.data.length} 门）`}
+                  color="primary"
+                  variant="outlined"
+                />
+              ) : selectedCourse ? (
                 <Chip
                   icon={<CalendarMonthRoundedIcon />}
                   label={selectedCourse.name}
@@ -560,7 +634,22 @@ export default function AssignmentsPage() {
           {operating && assignments.length === 0 ? (
             <ListSkeleton items={3} />
           ) : null}
+          {!operating && assignments.length === 0 ? (
+            <Card sx={surfaceCardSx}>
+              <CardContent sx={{ p: 3, textAlign: "center" }}>
+                <Typography variant="h6" sx={{ fontWeight: 800 }}>
+                  当前范围内没有可显示的作业
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.75 }}>
+                  可以关闭“只显示未完成”，或返回首页切换学期范围。
+                </Typography>
+              </CardContent>
+            </Card>
+          ) : null}
           {assignments.map((assignment) => {
+            const assignmentCourse = courses.data.find(
+              (course) => course.id === assignment.course_id
+            );
             const expanded = expandedAssignmentIds.includes(assignment.id);
             const submission = assignment.submission ?? undefined;
             const attachments =
@@ -578,7 +667,7 @@ export default function AssignmentsPage() {
             const lockAt = dayjs(assignment.lock_at);
             const dueAt = dayjs(assignment.due_at);
             const allowSubmit =
-              !isTAOrTeacher(selectedCourseId) &&
+              !isTAOrTeacher(assignment.course_id) &&
               !!assignment.submission &&
               !assignment.submission_types.includes("none") &&
               !assignment.submission_types.includes("not_graded") &&
@@ -586,7 +675,7 @@ export default function AssignmentsPage() {
               !now.isAfter(dueAt);
 
             return (
-              <Card key={assignment.id} sx={surfaceCardSx}>
+              <Card key={`${assignment.course_id}-${assignment.id}`} sx={surfaceCardSx}>
                 <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
                   <Stack spacing={2.5}>
                     <Stack
@@ -605,6 +694,14 @@ export default function AssignmentsPage() {
                           <Typography variant="h5" sx={{ fontWeight: 800 }}>
                             {assignment.name}
                           </Typography>
+                          {courseScopeId === ALL_COURSES_ID && assignmentCourse ? (
+                            <Chip
+                              size="small"
+                              label={assignmentCourse.name}
+                              color="info"
+                              variant="outlined"
+                            />
+                          ) : null}
                           {getAssignmentStatusChips(assignment, submission)}
                         </Stack>
                         <Stack
@@ -669,7 +766,7 @@ export default function AssignmentsPage() {
                       >
                         在 Canvas 打开
                       </Button>
-                      {isTAOrTeacher(selectedCourseId) ? (
+                      {isTAOrTeacher(assignment.course_id) ? (
                         <Button
                           variant="text"
                           startIcon={<EditCalendarRoundedIcon />}
@@ -763,7 +860,8 @@ export default function AssignmentsPage() {
                                           onClick={() =>
                                             void handleDeleteComment(
                                               comment.id,
-                                              assignment.id
+                                              assignment.id,
+                                              assignment.course_id
                                             )
                                           }
                                         >

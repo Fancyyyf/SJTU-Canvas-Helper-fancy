@@ -13,18 +13,23 @@ import { useMemo } from "react";
 
 import { Course } from "../lib/model";
 
+export const ALL_COURSES_ID = -2;
+
 export default function CourseSelect({
   courses,
   disabled,
   onChange,
   value,
+  includeAllOption = false,
 }: {
   courses: Course[];
   disabled?: boolean;
   onChange?: (courseId: number) => void;
   value?: number;
+  includeAllOption?: boolean;
 }) {
   const formatCourseName = (course: Course): string => {
+    if (course.id === ALL_COURSES_ID) return "全部课程（当前学期范围）";
     const term = course.term.name.replace("Spring", "春").replace("Fall", "秋");
     const teacherNames =
       course.teachers
@@ -37,13 +42,33 @@ export default function CourseSelect({
   };
 
   const formattedCourses = useMemo(() => {
-    return [...courses]
+    const formatted = [...courses]
       .map((course) => ({
         ...course,
         name: formatCourseName(course),
       }))
       .sort((a, b) => b.term.id - a.term.id);
-  }, [courses]);
+    if (includeAllOption && courses.length > 0) {
+      formatted.unshift({
+        id: ALL_COURSES_ID,
+        uuid: "all-courses",
+        name: "全部课程（当前学期范围）",
+        course_code: "",
+        enrollments: [],
+        access_restricted_by_date: false,
+        teachers: [],
+        term: {
+          id: -1,
+          name: "当前学期范围",
+          start_at: null,
+          end_at: null,
+          created_at: null,
+          workflow_state: "available",
+        },
+      });
+    }
+    return formatted;
+  }, [courses, includeAllOption]);
 
   const selectedCourse =
     formattedCourses.find((course) => course.id === value) ?? null;
@@ -75,6 +100,20 @@ export default function CourseSelect({
         />
       )}
       renderOption={(props, option) => {
+        if (option.id === ALL_COURSES_ID) {
+          return (
+            <Box component="li" {...props} sx={{ px: 2, py: 1.5 }}>
+              <Box>
+                <Typography variant="body2" sx={{ fontWeight: 800 }}>
+                  全部课程
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  汇总首页所选学期范围内的 {courses.length} 门课程
+                </Typography>
+              </Box>
+            </Box>
+          );
+        }
         const isTA = option.enrollments?.some(
           (enrollment) => enrollment.role === "TaEnrollment"
         );
@@ -145,6 +184,9 @@ export default function CourseSelect({
         }
 
         return options.filter((course) => {
+          if (course.id === ALL_COURSES_ID) {
+            return "全部课程 当前学期 汇总".includes(keyword);
+          }
           const nameMatch = course.name.toLowerCase().includes(keyword);
           const termMatch = course.term.name.toLowerCase().includes(keyword);
           const teacherMatch =

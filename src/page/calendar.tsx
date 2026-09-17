@@ -30,6 +30,7 @@ import { Link as RouterLink } from "react-router-dom";
 
 import BasicLayout from "../components/layout";
 import { WorkspaceHero } from "../components/workspace_hero";
+import { useCourses } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
 import { CalendarEvent, Colors, Course } from "../lib/model";
 
@@ -73,6 +74,7 @@ function getMonthGridDates(currentMonth: Dayjs) {
 
 export default function CalendarPage() {
   const [messageApi, contextHolder] = useAppMessage();
+  const courses = useCourses();
   const [currentMonth, setCurrentMonth] = useState<Dayjs>(dayjs());
   const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
   const [colors, setColors] = useState<Colors | undefined>();
@@ -82,14 +84,20 @@ export default function CalendarPage() {
   const [loading, setLoading] = useState<boolean>(false);
   const currentMonthRef = useRef<Dayjs>(dayjs());
   const contextCodesRef = useRef<string[]>([]);
+  const courseScopeKey = courses.data.map((course) => course.id).join(",");
 
   useEffect(() => {
-    init();
     document.body.addEventListener("keydown", handleKeyDownEvent, true);
     return () => {
       document.body.removeEventListener("keydown", handleKeyDownEvent, true);
     };
   }, []);
+
+  useEffect(() => {
+    void init(courses.data);
+    // The key changes only when the globally filtered course scope changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseScopeKey]);
 
   useEffect(() => {
     currentMonthRef.current = currentMonth;
@@ -136,11 +144,10 @@ export default function CalendarPage() {
     });
   };
 
-  const init = async () => {
+  const init = async (scopedCourses: Course[]) => {
     try {
       const nextColors = (await getColors()) as Colors;
-      const courses = (await invoke("list_courses")) as Course[];
-      const courseIds = Array.from(courses, (course) => `course_${course.id}`);
+      const courseIds = Array.from(scopedCourses, (course) => `course_${course.id}`);
       const nextContextCodes = courseIds.filter((courseId) =>
         Object.keys(nextColors.custom_colors).includes(courseId)
       );

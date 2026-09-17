@@ -19,11 +19,19 @@ import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRoundedIcon from "@mui/icons-material/SmartDisplayRounded";
 import TimelineRoundedIcon from "@mui/icons-material/TimelineRounded";
 import DeveloperBoardRoundedIcon from "@mui/icons-material/DeveloperBoardRounded";
+import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
+import DashboardCustomizeRoundedIcon from "@mui/icons-material/DashboardCustomizeRounded";
 import {
   Box,
   Button,
+  Checkbox,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Drawer,
+  FormControlLabel,
   IconButton,
   List,
   ListItemButton,
@@ -36,12 +44,13 @@ import {
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useAppMessage } from "../lib/message";
-import { logHandledError } from "../lib/logger";
+import { logDiagnostic, logHandledError } from "../lib/logger";
+import { LOG_LEVEL_INFO } from "../lib/model";
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
-import { useKeyPress } from "../lib/hooks";
-import { useConfigSelector } from "../lib/hooks";
+import { useConfigDispatch, useConfigSelector, useKeyPress } from "../lib/hooks";
+import { navigationSlice } from "../lib/store";
 import { checkForUpdates } from "../lib/utils";
 import { ChangeLogModal } from "./change_log_modal";
 
@@ -49,6 +58,7 @@ const drawerWidth = 272;
 const collapsedDrawerWidth = 92;
 
 const navigationItems = [
+  { key: "home", label: "首页", icon: <HomeRoundedIcon />, path: "/home" },
   { key: "agent", label: "Canvas Agent", icon: <PsychologyRoundedIcon />, path: "/agent" },
   { key: "attendance", label: "签到守望", icon: <HowToRegRoundedIcon />, path: "/attendance" },
   { key: "files", label: "文件管理", icon: <ArticleRoundedIcon />, path: "/files" },
@@ -66,6 +76,7 @@ const navigationItems = [
 ];
 
 const pageTitleMap: Record<string, string> = {
+  home: "首页",
   agent: "Canvas Agent",
   attendance: "签到守望",
   files: "文件管理",
@@ -85,14 +96,19 @@ const pageTitleMap: Record<string, string> = {
 
 export default function BasicLayout({ children }: React.PropsWithChildren) {
   const theme = useTheme();
+  const dispatch = useConfigDispatch();
   const config = useConfigSelector((state) => state.config.data);
+  const visibleSidebarItemKeys = useConfigSelector(
+    (state) => state.navigation.visibleItemKeys
+  );
   const isDesktop = useMediaQuery(theme.breakpoints.up("lg"));
   const isCompactWindow = useMediaQuery(theme.breakpoints.down("sm"));
   const location = useLocation();
-  const currentKey = location.pathname.split("/").filter(Boolean).pop() || "files";
+  const currentKey = location.pathname.split("/").filter(Boolean).pop() || "home";
   const currentTitle = pageTitleMap[currentKey] || "Canvas";
   const [version, setVersion] = useState("");
   const [showChangeLog, setShowChangeLog] = useState(false);
+  const [customizeSidebarOpen, setCustomizeSidebarOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [scale, setScale] = useState(1);
@@ -140,15 +156,73 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
 
 
   const displayedNavigationItems = useMemo(() => {
+    const visibleItems = navigationItems.filter(
+      (item) => item.key === "home" || visibleSidebarItemKeys.includes(item.key)
+    );
     if (!config?.debug_mode) {
-      return navigationItems;
+      return visibleItems;
     }
+    const debugItem = {
+      key: "debug",
+      label: "Debug 控制台",
+      icon: <DeveloperBoardRoundedIcon />,
+      path: "/debug",
+    };
+    const settingsIndex = visibleItems.findIndex((item) => item.key === "settings");
+    if (settingsIndex < 0) return [...visibleItems, debugItem];
     return [
-      ...navigationItems.slice(0, -1),
-      { key: "debug", label: "Debug 控制台", icon: <DeveloperBoardRoundedIcon />, path: "/debug" },
-      ...navigationItems.slice(-1),
+      ...visibleItems.slice(0, settingsIndex),
+      debugItem,
+      ...visibleItems.slice(settingsIndex),
     ];
-  }, [config?.debug_mode]);
+  }, [config?.debug_mode, visibleSidebarItemKeys]);
+
+  const updateVisibleSidebarItems = (nextKeys: string[]) => {
+    dispatch(navigationSlice.actions.setVisibleItemKeys(nextKeys));
+    logDiagnostic({
+      level: LOG_LEVEL_INFO,
+      code: "NAVIGATION.SIDEBAR_ITEMS_CHANGED",
+      scope: "layout",
+      action: "customize_sidebar",
+      outcome: "success",
+      recoverable: true,
+      context: { visibleItemKeys: nextKeys, visibleItemCount: nextKeys.length },
+    });
+  };
+
+  const customizeSidebarButton = (
+    <ListItemButton
+      onClick={() => setCustomizeSidebarOpen(true)}
+      sx={{
+        minHeight: 42,
+        px: collapsed && isDesktop ? 1.25 : 1.5,
+        borderRadius: "12px",
+        justifyContent: collapsed && isDesktop ? "center" : "flex-start",
+        color: "text.secondary",
+        border: "1px dashed",
+        borderColor: "divider",
+      }}
+    >
+      <ListItemIcon
+        sx={{
+          minWidth: collapsed && isDesktop ? 0 : 38,
+          color: "inherit",
+          justifyContent: "center",
+        }}
+      >
+        <DashboardCustomizeRoundedIcon />
+      </ListItemIcon>
+      {collapsed && isDesktop ? null : (
+        <ListItemText
+          primary="编辑侧边栏"
+          secondary={`${visibleSidebarItemKeys.length} 个快捷入口`}
+          primaryTypographyProps={{ fontSize: 14, fontWeight: 600 }}
+          secondaryTypographyProps={{ fontSize: 11 }}
+        />
+      )}
+    </ListItemButton>
+  );
+
   const drawerContent = (
     <Stack
       sx={{
@@ -274,6 +348,14 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
           })}
         </List>
 
+        {collapsed && isDesktop ? (
+          <Tooltip title="编辑侧边栏" placement="right">
+            {customizeSidebarButton}
+          </Tooltip>
+        ) : (
+          customizeSidebarButton
+        )}
+
         <Box sx={{ flex: 1 }} />
 
         <Divider sx={{ mt: 0.5 }} />
@@ -381,6 +463,56 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
         onCancel={() => setShowChangeLog(false)}
         onOk={() => setShowChangeLog(false)}
       />
+
+      <Dialog
+        open={customizeSidebarOpen}
+        onClose={() => setCustomizeSidebarOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>自定义侧边栏快捷入口</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            首页始终保留。未固定到侧边栏的功能仍可从首页功能目录进入。
+          </Typography>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" },
+              gap: 0.5,
+            }}
+          >
+            {navigationItems.slice(1).map((item) => (
+              <FormControlLabel
+                key={item.key}
+                control={
+                  <Checkbox
+                    checked={visibleSidebarItemKeys.includes(item.key)}
+                    onChange={(event) => {
+                      const nextKeys = event.target.checked
+                        ? [...visibleSidebarItemKeys, item.key]
+                        : visibleSidebarItemKeys.filter((key) => key !== item.key);
+                      updateVisibleSidebarItems(nextKeys);
+                    }}
+                  />
+                }
+                label={item.label}
+                sx={{ m: 0, px: 0.5, borderRadius: 1, "&:hover": { bgcolor: "action.hover" } }}
+              />
+            ))}
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 2 }}>
+          <Button onClick={() => updateVisibleSidebarItems(navigationItems.slice(1).map((item) => item.key))}>
+            全部显示
+          </Button>
+          <Button onClick={() => updateVisibleSidebarItems([])}>全部隐藏</Button>
+          <Box sx={{ flex: 1 }} />
+          <Button variant="contained" onClick={() => setCustomizeSidebarOpen(false)}>
+            完成
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { encode } from "js-base64";
-import type { IMainState } from "@cyntler/react-doc-viewer/dist/cjs/store/mainStateReducer";
+import type { DocRendererProps } from "@cyntler/react-doc-viewer";
 import CodeRenderer from "../code_renderer";
 import { render, screen } from "../../test/test-utils";
+
+type MainState = DocRendererProps["mainState"];
 
 const pyCode = `print("hello world")
 for i in range(10):
@@ -14,7 +16,7 @@ const largeLines = Array.from({ length: 5500 }, (_, i) => `line ${i + 1}`);
 const largeCode = largeLines.join("\n");
 const largeFileData = `data:text/plain;base64,${encode(largeCode)}`;
 
-function createMainState(overrides?: Partial<IMainState>): IMainState {
+function createMainState(overrides?: Partial<MainState>): MainState {
   return {
     currentFileNo: 0,
     documents: [],

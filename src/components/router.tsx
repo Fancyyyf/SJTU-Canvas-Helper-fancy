@@ -16,9 +16,11 @@ import SubmissionsPage from "../page/submissions";
 import SyllabusPage from "../page/syllabus";
 import UsersPage from "../page/users";
 import VideoPage from "../page/video";
+import HomePage from "../page/home";
 
 // 路由配置对象
 const routesConfig = [
+    { path: "/home", element: <HomePage /> },
     { path: "/agent", element: <CanvasAgentPage /> },
     { path: "/attendance", element: <AttendancePage /> },
     { path: "/annual", element: <AnnualPage /> },
@@ -41,7 +43,7 @@ export default function AppRouter() {
     return (
         <BrowserRouter>
             <Routes>
-                <Route index element={<Navigate to="/files" />} />
+                <Route index element={<Navigate to="/home" />} />
                 {routesConfig.map((route, index) => (
                     <Route key={index} path={route.path} element={route.element} />
                 ))}

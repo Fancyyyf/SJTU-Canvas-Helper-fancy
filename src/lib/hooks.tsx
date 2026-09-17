@@ -43,7 +43,12 @@ import {
   UserSubmissions,
   isFile,
 } from "./model";
-import { ConfigDispatch, ConfigState, courseSlice } from "./store";
+import { ConfigDispatch, ConfigState, courseSlice, termSlice } from "./store";
+import {
+  filterCoursesByTerm,
+  listTermOptions,
+  resolveTermSelection,
+} from "./term";
 import { isMergableFileType, moduleItem2File } from "./utils";
 
 const UPDATE_QRCODE_MESSAGE = '{ "type": "UPDATE_QR_CODE" }';
@@ -632,10 +637,11 @@ export function useLoginModal({ onLogin }: { onLogin?: () => void }) {
 export function useData<T>(command: string, shouldFetch: boolean, args?: any) {
   const [data, setData] = useState<T | undefined>();
   const [error, setError] = useState<unknown>();
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(shouldFetch);
 
   const mutate = async () => {
     setIsLoading(true);
+    setError(undefined);
     try {
       const data = (await invoke(command, args)) as T;
       setData(data);
@@ -675,7 +681,7 @@ export function useCourseSyllabus(courseId?: number) {
   return useData<Course>("get_course_syllabus", shouldFetch, args);
 }
 
-export function useCourses() {
+export function useAllCourses() {
   const courses = useData<Course[]>("list_courses", true);
 
   return {
@@ -684,9 +690,58 @@ export function useCourses() {
   };
 }
 
+export function useTermFilter(courses: Course[]) {
+  const storedSelection = useConfigSelector((state) => state.term.selectedTermId);
+  const dispatch = useConfigDispatch();
+  const terms = useMemo(() => listTermOptions(courses), [courses]);
+  const selectedTermId = useMemo(
+    () => resolveTermSelection(storedSelection, courses),
+    [courses, storedSelection]
+  );
+
+  useEffect(() => {
+    if (courses.length > 0 && selectedTermId !== storedSelection) {
+      dispatch(termSlice.actions.setSelectedTermId(selectedTermId));
+      dispatch(courseSlice.actions.setSelectedCourseId(-1));
+    }
+  }, [courses.length, dispatch, selectedTermId, storedSelection]);
+
+  const setSelectedTermId = useCallback(
+    (termId: number | "all") => {
+      dispatch(termSlice.actions.setSelectedTermId(termId));
+      dispatch(courseSlice.actions.setSelectedCourseId(-1));
+    },
+    [dispatch]
+  );
+
+  return { selectedTermId, setSelectedTermId, terms };
+}
+
+export function useCourses() {
+  const courses = useAllCourses();
+  const { selectedTermId } = useTermFilter(courses.data);
+  const filteredCourses = useMemo(
+    () => filterCoursesByTerm(courses.data, selectedTermId),
+    [courses.data, selectedTermId]
+  );
+  const { selectedCourseId, setSelectedCourseId } = useSelectedCourse();
+
+  useEffect(() => {
+    if (
+      courses.data.length > 0 &&
+      selectedCourseId > 0 &&
+      !filteredCourses.some((course) => course.id === selectedCourseId)
+    ) {
+      setSelectedCourseId(-1);
+    }
+  }, [courses.data.length, filteredCourses, selectedCourseId, setSelectedCourseId]);
+
+  return { ...courses, data: filteredCourses };
+}
+
 export function useTAOrTeacherCourses() {
-  const courses = useData<Course[]>("list_courses", true);
-  let data = courses.data ?? (EMPTY_ARRAY as Course[]);
+  const courses = useCourses();
+  let data = courses.data;
   data = data.filter((course) =>
     course.enrollments.find(
       (enrollment) =>
@@ -698,20 +753,6 @@ export function useTAOrTeacherCourses() {
     ...courses,
     data,
   };
-}
-
-export function useCurrentTermCourses() {
-  const courses = useCourses();
-  courses.data = courses.data.filter((course) => {
-    const courseEnd = dayjs(course.term.end_at);
-    const now = dayjs();
-    return (
-      now.isBefore(courseEnd) ||
-      course.enrollments.find((enroll) => enroll.role === "TaEnrollment") !=
-      undefined
-    );
-  });
-  return courses;
 }
 
 export function useMe() {

@@ -93,7 +93,17 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 + [x] 签到守望：自动识别屏幕中的课堂签到二维码，支持扫码登录态与账号密码/OCR 回退登录
 + [x] 多 API Key 管理：支持添加多个 LLM 服务商 Key，自动识别提供商并拉取可用模型列表
 + [x] MCP Server：将 Canvas 数据能力通过标准 MCP 协议开放给 AI 客户端
-+ [x] 自动更新 
++ [x] 自动更新
+
+### 首页与全局学期筛选
+
+侧栏顶部的“首页”集中展示当前 Canvas 用户、课程数量、任课/助教课程统计和常用功能入口。首页的“全局学期范围”支持选择最近有效学期、任意指定学期或“全部学期”。选择会保存在本机 WebView 的 `localStorage` 中，并同步应用到文件、作业、讨论、日历、成员、成绩、提交、教学大纲、视频和二维码等课程型页面。
+
+首页的功能目录始终保留所有页面入口。在首页“功能目录”右侧点击“自定义侧边栏”，或直接点击侧边栏导航列表下方的“编辑侧边栏”，可以逐项选择需要固定到侧边栏的快捷入口，也可以全部显示或全部隐藏；首页自身始终保留，不会因自定义而消失。侧边栏选择同样保存在本机 `localStorage` 中，重新启动应用后会自动恢复。功能卡片上的“侧边栏快捷入口”标签表示该功能当前已固定。
+
+首次加载时，应用优先选择当前日期所在的学期；若 Canvas 没有返回明确的起止日期，则回退到最近的学期。保存的学期在切换账号后不存在时，也会自动回退到该账号最近的有效学期。切换学期会清除不再属于当前范围的单课程选择，避免页面继续请求上一学期课程。
+
+作业列表额外提供“全部课程（当前学期范围）”选项。选择后会并行聚合当前全局学期内的所有课程作业，并在每条作业上显示课程标签；某一门课程请求失败时，其余课程仍会显示并给出降级提示。“只显示未完成”会按每门课程的学生/教师身份分别处理，提交、评论和修改日期等操作始终使用作业自身的 `course_id`，不会误用之前选中的课程。
 
 ### 文件下载/预览
 
@@ -478,27 +488,34 @@ python python/attendance/surveil.py --help
 
 `python python/attendance/nn.py --scan-once --json` 会真实读取当前屏幕。持续监听或调用 `surveil.py` 则可能发起真实登录/签到请求，开发时应使用明确授权的测试账号和有效测试场景。
 
-部分 Rust 测试会请求真实 Canvas API，并读取环境变量 `CANVAS_TOKEN`。没有 Token 时可以只运行离线测试，例如：
+默认的 `cargo test` 只运行可离线、可重复的单元测试和 Mock 测试。需要真实 Canvas Token 或 jAccount 服务的测试均带有明确的 `#[ignore = "原因"]`，因此没有账号配置和网络时也应当通过：
 
 ```shell
-cargo test --manifest-path src-tauri/Cargo.toml app::attendance::tests
-cargo test --manifest-path src-tauri/Cargo.toml client::basic::mock_tests
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-需要运行 Canvas 在线测试时：
+需要运行 Canvas 在线测试时，设置 Token 后只执行对应的 ignored 测试，避免同时触发其他可能修改真实数据的集成测试：
 
 ```powershell
 # PowerShell
 $env:CANVAS_TOKEN = "你的测试 Token"
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml client::basic::test -- --ignored --test-threads=1
 ```
 
 ```bash
 # macOS/Linux
-CANVAS_TOKEN="你的测试 Token" cargo test --manifest-path src-tauri/Cargo.toml
+CANVAS_TOKEN="你的测试 Token" cargo test --manifest-path src-tauri/Cargo.toml client::basic::test -- --ignored --test-threads=1
 ```
 
-当前依赖组合若在 `yarn typecheck` 中报告 `react-doc-viewer` 内部路径或 `react-ipynb-renderer` 的 `IpynbType` 导出错误，属于现存的第三方类型兼容问题。不要用 `npx vite build` 的成功替代正式类型检查；发布前应修复或锁定兼容依赖，否则 `yarn tauri build` 会在 `beforeBuildCommand: yarn build` 阶段停止。
+二维码 UUID 测试需要访问真实 jAccount 登录服务，可显式运行：
+
+```shell
+cargo test --manifest-path src-tauri/Cargo.toml client::video::tests::test_get_uuid -- --ignored
+```
+
+视频下载测试已改为本地 Mock HTTP 服务，不访问公网；输出使用系统临时目录和 RAII 清理器，即使请求或断言失败也不会在仓库中留下 MP4。不要直接运行不带过滤条件的 `cargo test -- --ignored`，因为仓库中还存在其他需要真实账号、可能读取或修改远端数据的手动集成测试。
+
+`yarn typecheck` 必须通过。测试代码通过公开的 `DocRendererProps["mainState"]` 获取文档查看器状态类型，Notebook 渲染器使用依赖公开导出的 `Ipynb` 类型；升级依赖时不要重新引用 `dist/` 内部路径或未导出的 `IpynbType`。
 
 #### 全局日志与错误处理约定
 
@@ -661,17 +678,7 @@ src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\
 yarn tauri build --no-sign --no-bundle --target x86_64-pc-windows-msvc
 ```
 
-当前依赖若仍触发上一节所述两个 TypeScript 类型错误，可以使用下面的命令生成仅供本地冒烟测试的安装包：
-
-```powershell
-yarn tauri build `
-  --no-sign `
-  --target x86_64-pc-windows-msvc `
-  --bundles msi,nsis `
-  --config '{"build":{"beforeBuildCommand":"npx vite build"}}'
-```
-
-该命令绕过了 `tsc`，不能用于正式发布。正式 Release 必须先让 `yarn typecheck` 和 `yarn build` 通过。
+不要通过覆盖 `beforeBuildCommand` 为 `npx vite build` 来绕过 TypeScript 检查。正式 Release 必须先让 `yarn typecheck` 和 `yarn build` 通过；依赖升级产生类型回归时，应修复公开类型引用或锁定依赖版本。
 
 正式生成 Updater 更新包时，先配置第 13 节的密钥，再移除 `--no-sign`：
 

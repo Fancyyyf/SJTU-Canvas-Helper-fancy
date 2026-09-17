@@ -26,7 +26,7 @@ import CourseSelect from "../components/course_select";
 import BasicLayout from "../components/layout";
 import { WorkspaceHero } from "../components/workspace_hero";
 import { TableSkeleton } from "../components/skeleton";
-import { useCurrentTermCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
+import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
 import { ExportUsersConfig, User } from "../lib/model";
 import { formatDate } from "../lib/utils";
@@ -44,7 +44,7 @@ export default function UsersPage() {
   } as ExportUsersConfig);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(20);
-  const courses = useCurrentTermCourses();
+  const courses = useCourses();
 
   const handleGetUsers = useCallback(async (courseId: number) => {
     if (courseId === -1) {

@@ -1,7 +1,7 @@
 import DataObjectRoundedIcon from "@mui/icons-material/DataObjectRounded";
 import { DocRendererProps } from "@cyntler/react-doc-viewer";
 import { decodeBase64Data } from "../lib/utils";
-import { IpynbRenderer, IpynbType } from "react-ipynb-renderer";
+import { IpynbRenderer, type Ipynb } from "react-ipynb-renderer";
 import "react-ipynb-renderer/dist/styles/darkbronco.css";
 import RendererShell from "./renderer_shell";
 
@@ -19,7 +19,7 @@ export default function JupiterNotebookRenderer({
             icon={<DataObjectRoundedIcon />}
             headerMode="none"
         >
-            <IpynbRenderer ipynb={data as IpynbType} />
+            <IpynbRenderer ipynb={data as Ipynb} />
         </RendererShell>
     );
 }

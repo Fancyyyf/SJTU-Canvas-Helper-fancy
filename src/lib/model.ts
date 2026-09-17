@@ -19,7 +19,7 @@ export interface Course {
     syllabus_body?: string;
 }
 
-interface Term {
+export interface Term {
     id: number;
     name: string;
     start_at: Option<string>;
@@ -27,6 +27,8 @@ interface Term {
     created_at: Option<string>;
     workflow_state: string;
 }
+
+export type TermSelection = number | "all" | null;
 
 export type EnrollmentRole = "TaEnrollment" | "StudentEnrollment" | "TeacherEnrollment" | "DesignerEnrollment" | "ObserverEnrollment" | "TemporaryStudentEnrollment" | "Other";
 
