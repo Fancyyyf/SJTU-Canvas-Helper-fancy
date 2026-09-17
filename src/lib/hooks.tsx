@@ -25,6 +25,7 @@ import { LoginAlertModal } from "../components/login_alert_modal";
 import PreviewModal from "../components/preview_modal";
 import { getConfig, saveConfig } from "./config";
 import { BASE_URL, JI_BASE_URL } from "./constants";
+import { logDiagnostic, logHandledError } from "./logger";
 import { appMessage } from "./message";
 import {
   AnnualReport,
@@ -34,6 +35,7 @@ import {
   File,
   Folder,
   LOG_LEVEL_ERROR,
+  LOG_LEVEL_WARN,
   LoginMessage,
   ModuleItem,
   RelationshipTopo,
@@ -42,7 +44,7 @@ import {
   isFile,
 } from "./model";
 import { ConfigDispatch, ConfigState, courseSlice } from "./store";
-import { consoleLog, isMergableFileType, moduleItem2File } from "./utils";
+import { isMergableFileType, moduleItem2File } from "./utils";
 
 const UPDATE_QRCODE_MESSAGE = '{ "type": "UPDATE_QR_CODE" }';
 const SEND_INTERVAL = 1000 * 25;
@@ -485,10 +487,35 @@ export function useQRCode({
         return;
       }
       setLoading(false);
+      logDiagnostic({
+        level: LOG_LEVEL_WARN,
+        code: "AUTH.QRCODE_UUID_MISSING",
+        scope: "qr-login",
+        action: "request_qrcode_uuid",
+        outcome: "failed",
+        recoverable: true,
+        fallback: {
+          used: true,
+          strategy: "offer_manual_retry",
+          result: "success",
+        },
+      });
       setError("登录页面未返回二维码标识，请稍后重试。");
     } catch (e) {
       setLoading(false);
-      consoleLog(LOG_LEVEL_ERROR, "获取登录二维码标识失败", e);
+      logHandledError({
+        code: "AUTH.QRCODE_UUID_REQUEST_FAILED",
+        scope: "qr-login",
+        action: "request_qrcode_uuid",
+        error: e,
+        userMessage: "获取登录二维码失败，请稍后重试。",
+        recoverable: true,
+        fallback: {
+          used: true,
+          strategy: "offer_manual_retry",
+          result: "success",
+        },
+      });
       setError(`获取登录二维码失败：${e}`);
     }
   }, []);
@@ -543,7 +570,15 @@ export function useQRCode({
             break;
         }
       } catch (e) {
-        consoleLog(LOG_LEVEL_ERROR, e);
+        logDiagnostic({
+          level: LOG_LEVEL_ERROR,
+          code: "AUTH.QRCODE_MESSAGE_INVALID",
+          scope: "qr-login",
+          action: "parse_websocket_message",
+          outcome: "failed",
+          recoverable: true,
+          error: e,
+        });
       }
     }
   }, [lastMessage]);
@@ -605,7 +640,15 @@ export function useData<T>(command: string, shouldFetch: boolean, args?: any) {
       const data = (await invoke(command, args)) as T;
       setData(data);
     } catch (e) {
-      consoleLog(LOG_LEVEL_ERROR, e);
+      logHandledError({
+        code: "DATA.COMMAND_FAILED",
+        scope: "data-hook",
+        action: command,
+        error: e,
+        userMessage: "数据加载失败，请稍后重试。",
+        recoverable: true,
+        context: { command },
+      });
       appMessage().error(e as string);
       setError(e);
     }

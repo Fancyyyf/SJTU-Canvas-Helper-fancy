@@ -26,8 +26,8 @@ import ReactAnsi from "react-ansi";
 
 import { useAppMessage } from "../lib/message";
 import { useWebviewEvent } from "../lib/events";
+import { logDiagnostic } from "../lib/logger";
 import { LOG_LEVEL_INFO, VideoAggregateParams } from "../lib/model";
-import { consoleLog } from "../lib/utils";
 import { PathSelector } from "./path_selector";
 
 type FfmpegState = "unknown" | "installed" | "uninstalled";
@@ -96,7 +96,14 @@ export default function VideoAggregator() {
       ...formData,
       outputName: `${formData.outputName}.mp4`,
     };
-    consoleLog(LOG_LEVEL_INFO, "params: ", params);
+    logDiagnostic({
+      level: LOG_LEVEL_INFO,
+      code: "VIDEO.AGGREGATION_REQUESTED",
+      scope: "video-aggregator",
+      action: "merge_videos",
+      outcome: "started",
+      recoverable: true,
+    });
     if (!(await preCheckFfmpegState())) {
       return;
     }

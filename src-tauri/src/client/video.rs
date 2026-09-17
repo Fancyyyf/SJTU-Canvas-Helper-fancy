@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::Write,
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -674,8 +675,13 @@ impl Client {
 
     async fn get_download_video_metadata(&self, url: &str) -> Result<(u64, bool)> {
         let resp = self.download_video_partial(url, 0, 0).await?;
-        // log headers:
-        tracing::info!("headers: {:?}", resp.headers());
+        tracing::debug!(
+            status = %resp.status(),
+            content_length = ?resp.headers().get(reqwest::header::CONTENT_LENGTH),
+            content_range = ?resp.headers().get(reqwest::header::CONTENT_RANGE),
+            accept_ranges = ?resp.headers().get(reqwest::header::ACCEPT_RANGES),
+            "Video download probe completed"
+        );
         Ok(parse_download_probe(resp.status(), resp.headers()))
     }
 
@@ -731,7 +737,7 @@ impl Client {
                 payload_guard.processed = current_offset;
                 progress_handler.lock().await(payload_guard.clone());
             }
-            tracing::info!("Successfully downloaded video to {}", save_path);
+            tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video download completed");
             return Ok(());
         }
 
@@ -739,7 +745,7 @@ impl Client {
         let payload = Arc::new(Mutex::new(payload));
 
         let nproc = num_cpus::get();
-        tracing::info!("nproc: {}", nproc);
+        tracing::debug!(workers = nproc, "Starting ranged video download");
         let chunk_size = size / nproc as u64;
         let mut tasks = JoinSet::new();
         for i in 0..nproc {
@@ -772,7 +778,6 @@ impl Client {
                     }
                     let bytes = response.bytes().await?;
                     let read_bytes = bytes.len() as u64;
-                    tracing::info!("read_bytes: {:?}", read_bytes);
                     {
                         let mut file = output_file.lock().await;
                         write_file_at_offset(file.by_ref(), &bytes, current_begin)?;
@@ -791,7 +796,7 @@ impl Client {
         while let Some(result) = tasks.join_next().await {
             result??;
         }
-        tracing::info!("Successfully downloaded video to {}", save_path);
+        tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video download completed");
         Ok(())
     }
 
@@ -819,10 +824,13 @@ impl Client {
         let oauth_nonce = self.get_oauth_nonce();
         let oauth_signature = self.get_oauth_signature(video_id, &oauth_nonce, oauth_consumer_key);
 
-        tracing::debug!("oauth_nonce: {}", oauth_nonce);
-        tracing::debug!("oauth_signature: {}", oauth_signature);
-        tracing::debug!("oauth_consumer_key: {}", oauth_consumer_key);
-        tracing::debug!("video_id: {}", video_id);
+        tracing::debug!(
+            video_id,
+            nonce_present = !oauth_nonce.is_empty(),
+            consumer_key_present = !oauth_consumer_key.is_empty(),
+            signature_present = !oauth_signature.is_empty(),
+            "Video OAuth request prepared"
+        );
 
         let video_id_str = video_id.to_string();
         form_data.insert("playTypeHls", "true");
@@ -974,8 +982,8 @@ impl Client {
         let mut file = File::create(save_path)?;
         file.write_all(&pdf_bytes)?;
         file.flush()?;
-        tracing::info!("PDF saved to {}", save_path);
-        tracing::info!("PDF warnings: {:?}", warning);
+        tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video slides PDF saved");
+        tracing::debug!(warning_count = warning.len(), "Video slides PDF conversion completed");
 
         Ok(())
     }

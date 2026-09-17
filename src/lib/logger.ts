@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   LOG_LEVEL_DEBUG,
   LOG_LEVEL_ERROR,
-  LOG_LEVEL_INFO,
   LOG_LEVEL_WARN,
   LogLevel,
 } from "./model";
@@ -264,4 +263,3 @@ export function installGlobalDiagnosticHandlers() {
     });
   });
 }
-

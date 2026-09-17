@@ -500,6 +500,83 @@ CANVAS_TOKEN="你的测试 Token" cargo test --manifest-path src-tauri/Cargo.tom
 
 当前依赖组合若在 `yarn typecheck` 中报告 `react-doc-viewer` 内部路径或 `react-ipynb-renderer` 的 `IpynbType` 导出错误，属于现存的第三方类型兼容问题。不要用 `npx vite build` 的成功替代正式类型检查；发布前应修复或锁定兼容依赖，否则 `yarn tauri build` 会在 `beforeBuildCommand: yarn build` 阶段停止。
 
+#### 全局日志与错误处理约定
+
+项目使用统一的结构化诊断事件，而不是在业务代码中直接调用 `console.log` 或拼接任意字符串。前端入口为 `src/lib/logger.ts`，Rust 入口为 `src-tauri/src/diagnostics.rs`；Tauri Command 返回的 `AppError` 会在序列化给前端前自动记录错误码、可恢复性和脱敏后的技术详情。
+
+一条前端诊断事件包含以下稳定字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `eventId` | 单次事件唯一标识，用户反馈时可提供此值 |
+| `traceId` | 跨多个阶段的操作链路标识，例如一次视频播放 |
+| `code` | 稳定、可检索的错误码，格式为 `DOMAIN.ACTION_RESULT` |
+| `scope` / `action` | 发生错误的页面、模块和动作 |
+| `outcome` | `started`、`success`、`failed`、`fallback` 或 `cancelled` |
+| `recoverable` | 当前错误是否允许用户重试或继续使用其他功能 |
+| `fallback` | 是否启用了降级策略、策略名称及其结果 |
+| `userMessage` | 展示给用户的简短提示，不应包含堆栈或凭据 |
+| `context` / `error` | 开发诊断上下文和技术错误；写入前会统一脱敏 |
+
+新增功能时应遵循三层分工：
+
+1. 用户提示说明“发生了什么、现在能做什么”，不要直接展示堆栈、请求正文或内部路径。
+2. 诊断事件说明失败阶段、稳定错误码、是否可恢复以及实际采用的 fallback。
+3. 原始技术信息只放进 `error` 或 `context`，交给统一脱敏器处理；不要记录密码、Token、Cookie、Authorization、OAuth nonce/签名、完整响应正文或带签名的 URL。
+
+前端推荐写法：
+
+```ts
+logHandledError({
+  code: "FILES.PREVIEW_FAILED",
+  scope: "file-preview",
+  action: "load_document",
+  error,
+  userMessage: "文件预览失败，请下载后查看。",
+  recoverable: true,
+  fallback: {
+    used: true,
+    strategy: "offer_download",
+    result: "success",
+  },
+  context: { fileType },
+});
+```
+
+如果同时展示全局通知，可使用 `messageApi.open({ type: "error", content, diagnostic: { ... } })`，把用户提示和诊断信息放在同一次事件中。旧的 `consoleLog` 仅作为迁移兼容层保留，新代码不得继续使用。未捕获的 `window.error`、Promise rejection 和 React 渲染错误会由全局处理器及 Error Boundary 自动记录。
+
+Rust 侧使用带字段的 `tracing` 事件，例如：
+
+```rust
+tracing::warn!(
+    code = "VIDEO.PROXY_RESTARTED",
+    %trace_id,
+    recoverable = true,
+    fallback = "restart_local_proxy",
+    "Video proxy task exited unexpectedly"
+);
+```
+
+日志级别约定如下：
+
+- `DEBUG`：阶段、计时、数量等仅供开发调试的信息。
+- `INFO`：关键生命周期成功事件，避免记录高频循环和每个数据分片。
+- `WARN`：功能发生可恢复异常，或 fallback 已接管。
+- `ERROR`：动作失败且 fallback 失败/不存在，或存在不可恢复的程序错误。
+
+开发构建保存 `DEBUG` 及以上级别，并在 WebView Console 输出结构化对象；Release 构建只保存 `WARN` 和 `ERROR`，前端不会附带详细 `context` 和堆栈。无论构建类型，密钥字段、敏感请求头、URL 查询凭据和 JSON 中的敏感键都会被替换为 `<redacted>`。HTTP 调试页只有在设置中显式开启调试模式后才收集请求，最多保留最近 1000 条，每个请求/响应正文预览最多 1 MiB。
+
+`app.log` 达到 8 MiB 后会在下一次启动时轮换为 `app.previous.log`，仅保留一份旧日志；应用内日志查看器最多读取当前日志最后 4 MiB。如果文件日志初始化失败，应用会降级到控制台日志并继续启动。排查问题时优先按 `eventId`、`traceId` 或 `code` 搜索，不要要求用户公开整个配置目录。
+
+提交涉及错误处理的代码前，至少运行：
+
+```powershell
+yarn lint
+yarn test
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml diagnostics::tests
+```
+
 #### 视频播放诊断日志
 
 每次点击课程视频都会生成一个随机 `traceId`。前端、Tauri 命令、本地媒体代理和源站请求均使用该 ID 记录同一条播放链路，因此排查时不需要反复重启应用。正常链路依次包含：

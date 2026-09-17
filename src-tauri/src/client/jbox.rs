@@ -56,7 +56,12 @@ impl Client {
         let url = format!("{JBOX_USER_SPACE_URL}?user_token={user_token}");
         let info = self.post_request::<PersonalSpaceInfo, _>(&url, "").await?;
         if info.status != 0 {
-            tracing::error!("{}", info.message);
+            tracing::error!(
+                code = "JBOX.SPACE_QUERY_FAILED",
+                status = info.status,
+                error = %crate::diagnostics::sanitize_text(&info.message),
+                "JBox space query failed"
+            );
             return Err(AppError::JBoxError(info.message));
         }
         Ok(info)
@@ -129,7 +134,7 @@ impl Client {
             .send()
             .await?
             .error_for_status()?;
-        tracing::info!("upload chunk: {}", part_number);
+        tracing::debug!(part_number, "JBox upload chunk completed");
         Ok(())
     }
 
@@ -160,7 +165,7 @@ impl Client {
         let result = self
             .post_request::<ConfirmChunkUploadResult, _>(&url, "")
             .await?;
-        tracing::info!("上传成功！crc64 = {}", result.crc64);
+        tracing::debug!(crc64_present = !result.crc64.is_empty(), "JBox upload confirmed");
         Ok(())
     }
 

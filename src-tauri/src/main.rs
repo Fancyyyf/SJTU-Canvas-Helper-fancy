@@ -1,18 +1,18 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::{fs, io, path::Path, sync::Arc};
 
-use serde::{Deserialize, Serialize};
 use error::{AppError, Result};
 use model::{
     Account, AccountInfo, AnnualReport, AppConfig, Assignment, AttendancePythonStatus,
-    AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, Colors, Course, DiscussionTopic, File,
-    FileChatStreamChunkPayload, FileChatStreamDonePayload, FileChatStreamErrorPayload, Folder,
-    FullDiscussion, LLMChatMessage, LogLevel, ModuleItem, NetworkRequestLog, QRCodeScanResult,
-    RelationshipTopo, Subject, Submission, User, UserSubmissions,
-    VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
+    AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, Colors, Course,
+    DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
+    FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel, ModuleItem,
+    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, User,
+    UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
 };
+use serde::{Deserialize, Serialize};
 
 use tauri::{Emitter, Runtime, Window};
 use tracing::Level;
@@ -36,6 +36,26 @@ extern crate lazy_static;
 
 lazy_static! {
     static ref APP: App = App::new();
+}
+
+const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+fn rotate_log_if_oversized(log_dir: &str) -> io::Result<bool> {
+    let current = Path::new(log_dir).join("app.log");
+    let previous = Path::new(log_dir).join("app.previous.log");
+    let metadata = match fs::metadata(&current) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() < MAX_LOG_FILE_BYTES {
+        return Ok(false);
+    }
+    if previous.exists() {
+        fs::remove_file(&previous)?;
+    }
+    fs::rename(current, previous)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -173,8 +193,8 @@ async fn check_zhipu_balance(cli: &reqwest::Client, api_key: &str) -> Result<Use
         return Err(AppError::LLMError("智谱余额查询失败，请检查 API Key。".into()));
     }
     let text = resp.text().await?;
-    tracing::info!("Zhipu balance response: {}", text);
     let body: ZhipuBalanceResponse = serde_json::from_str(&text)?;
+    tracing::debug!(provider = "zhipu", "LLM balance response parsed");
     Ok(UserBalance {
         available_balance: body.data.available_balance,
         voucher_balance: body.data.voucher_balance,
@@ -189,19 +209,21 @@ async fn check_minimax_balance(cli: &reqwest::Client, auth: &str) -> Result<User
         .header("Content-Type", "application/json")
         .send()
         .await?;
-            if !resp.status().is_success() {
-                return Err(AppError::LLMError("MiniMax 余额查询失败，请检查 API Key。".into()));
-            }
-            let text = resp.text().await?;
-            tracing::info!("MiniMax balance response: {}", text);
-            let body: MiniMaxBalanceResponse = serde_json::from_str(&text)?;
-            let d = body.data.unwrap_or_default();
-            Ok(UserBalance {
-                available_balance: d.available_balance,
-                voucher_balance: None,
-                cash_balance: None,
-            })
-        }
+    if !resp.status().is_success() {
+        return Err(AppError::LLMError(
+            "MiniMax 余额查询失败，请检查 API Key。".into(),
+        ));
+    }
+    let text = resp.text().await?;
+    let body: MiniMaxBalanceResponse = serde_json::from_str(&text)?;
+    tracing::debug!(provider = "minimax", "LLM balance response parsed");
+    let d = body.data.unwrap_or_default();
+    Ok(UserBalance {
+        available_balance: d.available_balance,
+        voucher_balance: None,
+        cash_balance: None,
+    })
+}
 
 #[tauri::command]
 async fn run_video_aggregate<R: Runtime>(
@@ -694,7 +716,7 @@ async fn get_colors() -> Result<Colors> {
 
 #[tauri::command]
 async fn save_config(config: AppConfig) -> Result<()> {
-    tracing::info!("Receive config update");
+    tracing::debug!("Configuration update received");
     APP.save_config(config).await
 }
 
@@ -1000,6 +1022,7 @@ async fn main() -> Result<()> {
     // read-only (for example in a sandbox), so retain stdout logging as a
     // reliable fallback and report the degraded state there.
     let log_dir = App::config_dir()?;
+    let rotation_result = rotate_log_if_oversized(&log_dir);
     let max_log_level = if cfg!(debug_assertions) {
         Level::DEBUG
     } else {
@@ -1040,6 +1063,15 @@ async fn main() -> Result<()> {
         );
     } else {
         tracing::info!(log_dir = %log_dir, "File logging initialized");
+    }
+    match rotation_result {
+        Ok(true) => tracing::info!("Oversized diagnostic log rotated"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            error = %diagnostics::sanitize_text(&error.to_string()),
+            fallback = "continue_with_existing_log",
+            "Diagnostic log rotation failed"
+        ),
     }
 
     APP.init().await?;

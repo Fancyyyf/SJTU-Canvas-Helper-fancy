@@ -54,11 +54,14 @@ impl NetworkDebugStore {
     }
 
     pub async fn capture_response_body(&self, log_id: Option<&str>, body: &[u8]) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
         let mut logs = self.logs.write().await;
-        let target = log_id
-            .and_then(|id| logs.iter_mut().find(|log| log.id == id))
-            .or_else(|| logs.iter_mut().rev().find(|log| log.response_body.is_none()));
-        if let Some(log) = target {
+        let target_index = log_id
+            .and_then(|id| logs.iter().position(|log| log.id == id))
+            .or_else(|| logs.iter().rposition(|log| log.response_body.is_none()));
+        if let Some(log) = target_index.and_then(|index| logs.get_mut(index)) {
             let truncated = body.len() > MAX_BODY_PREVIEW_BYTES;
             let end = body.len().min(MAX_BODY_PREVIEW_BYTES);
             log.response_body = Some(sanitize_body(&body[..end]));
@@ -71,6 +74,9 @@ impl NetworkDebugStore {
         client: &reqwest::Client,
         request: Request,
     ) -> std::result::Result<Response, reqwest::Error> {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return client.execute(request).await;
+        }
         let log = self.capture_request(&request);
         let started = Instant::now();
         let mut result = client.execute(request).await;

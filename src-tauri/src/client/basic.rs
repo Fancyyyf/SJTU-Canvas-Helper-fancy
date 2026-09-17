@@ -124,7 +124,11 @@ impl Client {
 
     pub async fn set_base_url<S: Into<String>>(&self, base_url: S) -> bool {
         let base_url = base_url.into();
-        tracing::info!("set_base_url: {:?}", &base_url);
+        let base_origin = reqwest::Url::parse(&base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(|host| format!("{}://{host}", url.scheme())))
+            .unwrap_or_else(|| "<invalid>".to_owned());
+        tracing::debug!(%base_origin, "Canvas base URL updated");
         if *self.base_url.read().await != base_url {
             *self.base_url.write().await = base_url;
             return true;
@@ -352,6 +356,7 @@ impl Client {
             total: file.size,
         };
         let path = Path::new(save_path).join(&file.display_name);
+        let display_name = file.display_name.clone();
         let total = file.size;
         let mut file = fs::File::create(path.to_str().unwrap())?;
         let mut last_chunk_no = 0;
@@ -365,7 +370,7 @@ impl Client {
             file.write_all(&chunk)?;
         }
 
-        tracing::info!("File {:?} downloaded successfully!", path);
+        tracing::info!(file_name = %display_name, bytes = total, "Canvas file download completed");
         Ok(())
     }
 
@@ -512,7 +517,7 @@ impl Client {
     ) -> Result<Vec<File>> {
         let folders_and_files = self.get_folders_and_files(course.id, token).await?;
         let folders_map = &folders_and_files.folders_map;
-        tracing::info!("folders_map: {:?}", folders_map);
+        tracing::debug!(folder_count = folders_map.len(), "Course folder map built");
         let files = folders_and_files
             .files
             .into_iter()

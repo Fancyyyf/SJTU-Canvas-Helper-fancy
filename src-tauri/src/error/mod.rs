@@ -129,7 +129,11 @@ impl AppError {
                 sanitize_text(&error.to_string()),
                 sanitize_text(object_type)
             ),
-            Self::IO(error) => format!("kind={:?}, error={}", error.kind(), sanitize_text(&error.to_string())),
+            Self::IO(error) => format!(
+                "kind={:?}, error={}",
+                error.kind(),
+                sanitize_text(&error.to_string())
+            ),
             _ => sanitize_text(&self.to_string()),
         }
     }

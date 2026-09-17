@@ -38,6 +38,7 @@ use super::{
 };
 
 const MY_CANVAS_FILES_FOLDER_NAME: &str = "我的Canvas文件";
+const MAX_LOG_READ_BYTES: usize = 4 * 1024 * 1024;
 
 async fn proxy_video_request(
     trace_id: String,
@@ -191,9 +192,14 @@ async fn proxy_video_request(
 impl App {
     fn ensure_directory(dir: &str) {
         let metadata = fs::metadata(dir);
-        tracing::info!("dir: {:?}", dir);
         if metadata.is_err() {
-            _ = fs::create_dir_all(dir);
+            match fs::create_dir_all(dir) {
+                Ok(()) => tracing::debug!("Application directory created"),
+                Err(error) => tracing::warn!(
+                    error = %crate::diagnostics::sanitize_text(&error.to_string()),
+                    "Unable to create application directory"
+                ),
+            }
         }
     }
 
@@ -345,9 +351,12 @@ impl App {
                 account
             }
         };
-        tracing::info!("Read current account: {:?}", account_info);
+        tracing::debug!(
+            account_count = account_info.all_accounts.len(),
+            "Account registry loaded"
+        );
         let config_path = App::get_config_path(&account_info.current_account);
-        tracing::info!("Read config path: {}", config_path);
+        tracing::debug!("Active account configuration selected");
         let config = App::read_config_from_file(&config_path).unwrap_or_default();
 
         let canvas_base_url = Self::get_base_url(&config.account_type);
@@ -921,7 +930,12 @@ impl App {
                         results.push(scan_result);
                     }
                 }
-                Err(err) => tracing::error!("{:?}", err),
+                Err(err) => tracing::warn!(
+                    code = "QRCODE.IMAGE_SCAN_SKIPPED",
+                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
+                    fallback = "continue_with_remaining_images",
+                    "QR code image scan failed"
+                ),
             }
         }
         Ok(results)
@@ -1026,7 +1040,7 @@ impl App {
             .join(folder_path);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::info!("Download file at path: {:?}", save_path);
+        tracing::debug!(file_name = %file.display_name, "Course file download requested");
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
@@ -1046,7 +1060,7 @@ impl App {
             .join(folder_path);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::info!("Download file at path: {:?}", save_path);
+        tracing::debug!(file_name = %file.display_name, "Personal file download requested");
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
@@ -1454,12 +1468,21 @@ impl App {
             Ok(output) => {
                 if !output.status.success() {
                     let error_msg = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!("docx to pdf conversion failed with status: {:?}, stderr: {}", output.status, error_msg);
+                    tracing::error!(
+                        code = "FILE.DOCX_TO_PDF_FAILED",
+                        status = ?output.status,
+                        error = %crate::diagnostics::sanitize_text(&error_msg),
+                        "DOCX to PDF conversion failed"
+                    );
                     return Err(AppError::FunctionUnsupported);
                 }
             },
             Err(err) => {
-                tracing::error!("Failed to execute powershell command for docx to pdf conversion: {:?}", err);
+                tracing::error!(
+                    code = "FILE.DOCX_CONVERTER_LAUNCH_FAILED",
+                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
+                    "Unable to launch DOCX converter"
+                );
                 return Err(err.into());
             }
         };
@@ -1481,12 +1504,21 @@ impl App {
             Ok(output) => {
                 if !output.status.success() {
                     let error_msg = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!("pptx to pdf conversion failed with status: {:?}, stderr: {}", output.status, error_msg);
+                    tracing::error!(
+                        code = "FILE.PPTX_TO_PDF_FAILED",
+                        status = ?output.status,
+                        error = %crate::diagnostics::sanitize_text(&error_msg),
+                        "PPTX to PDF conversion failed"
+                    );
                     return Err(AppError::FunctionUnsupported);
                 }
             },
             Err(err) => {
-                tracing::error!("Failed to execute powershell command for pptx to pdf conversion: {:?}", err);
+                tracing::error!(
+                    code = "FILE.PPTX_CONVERTER_LAUNCH_FAILED",
+                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
+                    "Unable to launch PPTX converter"
+                );
                 return Err(err.into());
             }
         };
@@ -1619,7 +1651,12 @@ impl App {
     pub fn read_log_content() -> Result<String> {
         let log_file_path = App::config_dir()?;
         let path = Path::new(&log_file_path).join("app.log");
-        let content = fs::read_to_string(path)?;
-        Ok(content)
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let start = content.len().saturating_sub(MAX_LOG_READ_BYTES);
+        Ok(String::from_utf8_lossy(&content[start..]).into_owned())
     }
 }

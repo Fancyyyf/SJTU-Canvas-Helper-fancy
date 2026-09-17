@@ -49,9 +49,10 @@ import { WorkspaceHero } from "../components/workspace_hero";
 import { LoginAlert } from "../components/login_alert";
 import { getConfig, saveConfig, updateConfig } from "../lib/config";
 import { useConfigDispatch, useQRCode } from "../lib/hooks";
+import { logDiagnostic, logHandledError } from "../lib/logger";
 import { useAppMessage } from "../lib/message";
-import { AccountInfo, AppConfig, LOG_LEVEL_INFO, User } from "../lib/model";
-import { consoleLog, savePathValidator } from "../lib/utils";
+import { AccountInfo, AppConfig, LOG_LEVEL_INFO, LOG_LEVEL_WARN, User } from "../lib/model";
+import { savePathValidator } from "../lib/utils";
 
 type AccountMode = "create" | "select";
 
@@ -385,17 +386,52 @@ export default function SettingsPage() {
   const checkExtraLoginStatus = useCallback(
     async (silent = false) => {
       setCheckingExtraLogin(true);
-      consoleLog(LOG_LEVEL_INFO, "check_extra_login_status");
+      logDiagnostic({
+        level: LOG_LEVEL_INFO,
+        code: "AUTH.EXTRA_SESSION_CHECK_STARTED",
+        scope: "settings",
+        action: "check_extra_login_status",
+        outcome: "started",
+        recoverable: true,
+      });
       try {
         const ok = (await invoke("check_extra_login_status")) as boolean;
         setExtraLoginReady(ok);
         if (!ok && !silent) {
           messageApi.warning("当前额外登录态不可用，请重新扫码。");
         }
-        consoleLog(LOG_LEVEL_INFO, "check_extra_login_status", ok);
+        logDiagnostic({
+          level: ok ? LOG_LEVEL_INFO : LOG_LEVEL_WARN,
+          code: ok
+            ? "AUTH.EXTRA_SESSION_CHECK_SUCCEEDED"
+            : "AUTH.EXTRA_SESSION_INVALID",
+          scope: "settings",
+          action: "check_extra_login_status",
+          outcome: ok ? "success" : "fallback",
+          recoverable: true,
+          fallback: ok
+            ? undefined
+            : {
+                used: true,
+                strategy: "offer_qrcode_relogin",
+                result: "success",
+              },
+        });
         return ok;
       } catch (error) {
-        consoleLog(LOG_LEVEL_INFO, "check_extra_login_status", error);
+        logHandledError({
+          code: "AUTH.EXTRA_SESSION_CHECK_FAILED",
+          scope: "settings",
+          action: "check_extra_login_status",
+          error,
+          userMessage: "额外登录态检查失败，请稍后重试。",
+          recoverable: true,
+          fallback: {
+            used: true,
+            strategy: "preserve_indeterminate_session_state",
+            result: "success",
+          },
+        });
         // A connectivity failure does not prove that the saved login has
         // expired. Keep the state indeterminate so we do not immediately
         // replace the status panel with a QR login flow.

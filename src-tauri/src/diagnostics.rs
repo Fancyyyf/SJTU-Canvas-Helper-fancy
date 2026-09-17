@@ -114,9 +114,10 @@ pub fn sanitize_text(value: &str) -> String {
         r"(?i)((?:password|passwd|token|api[_-]?key|signature|jwt|cookie|secret)\s*[:=]\s*)[^\s,;&]+",
     )
     .expect("valid regex");
+    let bearer_redacted = bearer.replace_all(value, "$1<redacted>");
     truncate(
         assignments
-            .replace_all(&bearer.replace_all(value, "$1<redacted>"), "$1<redacted>")
+            .replace_all(&bearer_redacted, "$1<redacted>")
             .into_owned(),
     )
 }
@@ -161,33 +162,59 @@ pub fn emit_frontend_event(mut event: FrontendDiagnosticEvent) {
     let trace_id = event.trace_id.as_deref().unwrap_or("unscoped");
     let user_message = event.user_message.as_deref().unwrap_or("<none>");
 
-    macro_rules! emit {
-        ($macro:ident) => {
-            tracing::$macro!(
-                target: "frontend_diagnostic",
-                schema_version = event.schema_version,
-                event_id = %event.event_id,
-                timestamp = %event.timestamp,
-                code = %event.code,
-                scope = %event.scope,
-                action = %event.action,
-                outcome = %event.outcome,
-                recoverable = event.recoverable,
-                %trace_id,
-                %fallback,
-                %user_message,
-                %context,
-                %error,
-                "Frontend diagnostic event"
-            )
-        };
-    }
-
     match event.level {
-        i32::MIN..=0 => emit!(debug),
-        1 => emit!(info),
-        2 => emit!(warn),
-        _ => emit!(error),
+        i32::MIN..=0 => tracing::debug!(
+            target: "frontend_diagnostic",
+            schema_version = event.schema_version,
+            event_id = %event.event_id,
+            timestamp = %event.timestamp,
+            code = %event.code,
+            scope = %event.scope,
+            action = %event.action,
+            outcome = %event.outcome,
+            recoverable = event.recoverable,
+            %trace_id, %fallback, %user_message, %context, %error,
+            "Frontend diagnostic event"
+        ),
+        1 => tracing::info!(
+            target: "frontend_diagnostic",
+            schema_version = event.schema_version,
+            event_id = %event.event_id,
+            timestamp = %event.timestamp,
+            code = %event.code,
+            scope = %event.scope,
+            action = %event.action,
+            outcome = %event.outcome,
+            recoverable = event.recoverable,
+            %trace_id, %fallback, %user_message, %context, %error,
+            "Frontend diagnostic event"
+        ),
+        2 => tracing::warn!(
+            target: "frontend_diagnostic",
+            schema_version = event.schema_version,
+            event_id = %event.event_id,
+            timestamp = %event.timestamp,
+            code = %event.code,
+            scope = %event.scope,
+            action = %event.action,
+            outcome = %event.outcome,
+            recoverable = event.recoverable,
+            %trace_id, %fallback, %user_message, %context, %error,
+            "Frontend diagnostic event"
+        ),
+        _ => tracing::error!(
+            target: "frontend_diagnostic",
+            schema_version = event.schema_version,
+            event_id = %event.event_id,
+            timestamp = %event.timestamp,
+            code = %event.code,
+            scope = %event.scope,
+            action = %event.action,
+            outcome = %event.outcome,
+            recoverable = event.recoverable,
+            %trace_id, %fallback, %user_message, %context, %error,
+            "Frontend diagnostic event"
+        ),
     }
 }
 
