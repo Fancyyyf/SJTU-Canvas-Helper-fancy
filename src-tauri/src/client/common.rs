@@ -45,8 +45,11 @@ impl Client {
             .get_request_with_token(url, query, token)
             .await?
             .error_for_status()?;
+        let log_id = super::debug::NetworkDebugStore::response_log_id(&response);
         let bytes = response.bytes().await?;
-        self.debug_store.capture_response_body(&bytes).await;
+        self.debug_store
+            .capture_response_body(log_id.as_deref(), &bytes)
+            .await;
         let json = utils::json::parse_json(&bytes)?;
         Ok(json)
     }
@@ -103,8 +106,11 @@ impl Client {
             .header(CONTENT_TYPE, "application/json");
         let req = req.build()?;
         let resp = self.execute_request(req).await?.error_for_status()?;
+        let log_id = super::debug::NetworkDebugStore::response_log_id(&resp);
         let bytes = resp.bytes().await?;
-        self.debug_store.capture_response_body(&bytes).await;
+        self.debug_store
+            .capture_response_body(log_id.as_deref(), &bytes)
+            .await;
 
         // tracing::info!("resp: {:?}", String::from_utf8_lossy(&bytes.to_vec()));
         let result = utils::json::parse_json(&bytes)?;
@@ -142,8 +148,11 @@ impl Client {
 
         let req = req.build()?;
         let response = self.execute_request(req).await?.error_for_status()?;
+        let log_id = super::debug::NetworkDebugStore::response_log_id(&response);
         let bytes = response.bytes().await?;
-        self.debug_store.capture_response_body(&bytes).await;
+        self.debug_store
+            .capture_response_body(log_id.as_deref(), &bytes)
+            .await;
         let json = utils::json::parse_json(&bytes)?;
         Ok(json)
     }

@@ -18,12 +18,14 @@ import {
   AssignmentDate,
   Attachment,
   File as FileModel,
-  LOG_LEVEL_ERROR,
+  LOG_LEVEL_DEBUG,
+  LOG_LEVEL_INFO,
   LogLevel,
   ModuleItem,
   Option
 } from "./model";
 import { AppMessageApi } from "./message";
+import { logDiagnostic, logHandledError, logLegacy } from "./logger";
 
 export function isMergableFileType(fileType: string): boolean {
   for (const ext of ["pptx", "pdf", "docx"]) {
@@ -317,38 +319,60 @@ export async function checkForUpdates(messageApi: AppMessageApi) {
         switch (event.event) {
           case 'Started':
             contentLength = event.data.contentLength;
-            console.log(`started downloading ${event.data.contentLength} bytes`);
+            logDiagnostic({
+              level: LOG_LEVEL_INFO,
+              code: "UPDATER.DOWNLOAD_STARTED",
+              scope: "updater",
+              action: "download_update",
+              outcome: "started",
+              recoverable: true,
+              context: { contentLength },
+            });
             break;
           case 'Progress':
             downloaded += event.data.chunkLength;
-            console.log(`downloaded ${downloaded} from ${contentLength}`);
+            logDiagnostic({
+              level: LOG_LEVEL_DEBUG,
+              code: "UPDATER.DOWNLOAD_PROGRESS",
+              scope: "updater",
+              action: "download_update",
+              outcome: "started",
+              recoverable: true,
+              context: { downloaded, contentLength },
+            });
             break;
           case 'Finished':
-            console.log('download finished');
+            logDiagnostic({
+              level: LOG_LEVEL_INFO,
+              code: "UPDATER.DOWNLOAD_FINISHED",
+              scope: "updater",
+              action: "download_update",
+              outcome: "success",
+              recoverable: true,
+              context: { downloaded, contentLength },
+            });
             break;
         }
       });
     }
   } catch (error) {
+    logHandledError({
+      code: "UPDATER.CHECK_OR_INSTALL_FAILED",
+      scope: "updater",
+      action: "check_and_install",
+      error,
+      userMessage: "检查或安装更新失败，请稍后重试。",
+      recoverable: true,
+      fallback: { used: true, strategy: "keep_current_version", result: "success" },
+    });
     messageApi.error("🥹出现错误：" + error);
   }
   await relaunch();
 }
 
 export function consoleLog(logLevel: LogLevel, ...messages: any[]) {
-  const message = messages
-    .map((msg) => {
-      if (typeof msg === "object") {
-        return JSON.stringify(msg);
-      } else {
-        return String(msg);
-      }
-    })
-    .join(" ");
-
   const context = new Error().stack?.split("\n")[1];
-  invoke("console_log", { logLevel, context, message });
-  console.log(message);
+  logLegacy(logLevel, messages, context);
 }
 
 export function srtToVtt(srt: string) {
@@ -373,7 +397,15 @@ function detectExternalType(item: ModuleItem) {
     return [fileName, "Link"];
   }
   const ext = fileName.slice(idx);
-  consoleLog(LOG_LEVEL_ERROR, "ext", ext);
+  logDiagnostic({
+    level: LOG_LEVEL_DEBUG,
+    code: "FILE.EXTERNAL_TYPE_DETECTED",
+    scope: "files",
+    action: "classify_external_item",
+    outcome: "success",
+    recoverable: true,
+    context: { extension: ext },
+  });
   if (supportedExt.indexOf(ext) !== -1) {
     return [fileName, "File"];
   }

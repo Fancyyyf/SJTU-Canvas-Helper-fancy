@@ -9,7 +9,10 @@ use reqwest::{header::HeaderMap, Request, Response};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::model::{DebugHttpHeader, NetworkRequestLog};
+use crate::{
+    diagnostics::{sanitize_body, sanitize_header_value, sanitize_text, sanitize_url},
+    model::{DebugHttpHeader, NetworkRequestLog},
+};
 
 const MAX_NETWORK_LOGS: usize = 1000;
 const MAX_BODY_PREVIEW_BYTES: usize = 1024 * 1024;
@@ -19,6 +22,9 @@ pub struct NetworkDebugStore {
     enabled: AtomicBool,
     logs: RwLock<VecDeque<NetworkRequestLog>>,
 }
+
+#[derive(Clone, Debug)]
+struct NetworkLogId(String);
 
 impl NetworkDebugStore {
     pub fn new(enabled: bool) -> Self {
@@ -40,13 +46,22 @@ impl NetworkDebugStore {
         self.logs.write().await.clear();
     }
 
-    pub async fn capture_response_body(&self, body: &[u8]) {
+    pub fn response_log_id(response: &Response) -> Option<String> {
+        response
+            .extensions()
+            .get::<NetworkLogId>()
+            .map(|value| value.0.clone())
+    }
+
+    pub async fn capture_response_body(&self, log_id: Option<&str>, body: &[u8]) {
         let mut logs = self.logs.write().await;
-        // Update the most recent log entry without a response body
-        if let Some(log) = logs.iter_mut().rev().find(|l| l.response_body.is_none()) {
+        let target = log_id
+            .and_then(|id| logs.iter_mut().find(|log| log.id == id))
+            .or_else(|| logs.iter_mut().rev().find(|log| log.response_body.is_none()));
+        if let Some(log) = target {
             let truncated = body.len() > MAX_BODY_PREVIEW_BYTES;
             let end = body.len().min(MAX_BODY_PREVIEW_BYTES);
-            log.response_body = Some(String::from_utf8_lossy(&body[..end]).to_string());
+            log.response_body = Some(sanitize_body(&body[..end]));
             log.response_body_truncated = truncated;
         }
     }
@@ -58,7 +73,7 @@ impl NetworkDebugStore {
     ) -> std::result::Result<Response, reqwest::Error> {
         let log = self.capture_request(&request);
         let started = Instant::now();
-        let result = client.execute(request).await;
+        let mut result = client.execute(request).await;
 
         let mut network_log = NetworkRequestLog {
             id: log.id,
@@ -87,8 +102,14 @@ impl NetworkDebugStore {
             Err(error) => {
                 network_log.status = error.status().map(|status| status.as_u16());
                 network_log.ok = Some(false);
-                network_log.error = Some(error.to_string());
+                network_log.error = Some(sanitize_text(&error.to_string()));
             }
+        }
+
+        if let Ok(response) = &mut result {
+            response
+                .extensions_mut()
+                .insert(NetworkLogId(network_log.id.clone()));
         }
 
         self.push_log(network_log).await;
@@ -116,7 +137,7 @@ impl NetworkDebugStore {
             timestamp: Utc::now().to_rfc3339(),
             source: request.url().host_str().unwrap_or("unknown").to_owned(),
             method: request.method().as_str().to_owned(),
-            url: request.url().to_string(),
+            url: sanitize_url(request.url()),
             request_headers: headers_to_debug(request.headers()),
             request_body,
             request_body_truncated,
@@ -150,7 +171,7 @@ fn body_preview(request: &Request) -> (Option<String>, bool) {
     let truncated = bytes.len() > MAX_BODY_PREVIEW_BYTES;
     let end = bytes.len().min(MAX_BODY_PREVIEW_BYTES);
     (
-        Some(String::from_utf8_lossy(&bytes[..end]).to_string()),
+        Some(sanitize_body(&bytes[..end])),
         truncated,
     )
 }
@@ -168,13 +189,3 @@ fn headers_to_debug(headers: &HeaderMap) -> Vec<DebugHttpHeader> {
         .collect()
 }
 
-fn sanitize_header_value(name: &str, value: &str) -> String {
-    if matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
-    ) {
-        "<redacted>".to_owned()
-    } else {
-        value.to_owned()
-    }
-}

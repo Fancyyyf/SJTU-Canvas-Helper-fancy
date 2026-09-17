@@ -6,6 +6,9 @@ import {
 } from "@mui/material";
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
+import { logDiagnostic, type DiagnosticEventInput } from "./logger";
+import { LOG_LEVEL_ERROR, LOG_LEVEL_WARN } from "./model";
+
 type MessageType = "success" | "error" | "warning" | "info" | "loading";
 
 interface MessageOptions {
@@ -13,6 +16,7 @@ interface MessageOptions {
   type?: MessageType;
   content: ReactNode;
   duration?: number;
+  diagnostic?: Partial<Omit<DiagnosticEventInput, "level" | "userMessage">>;
 }
 
 interface MessageRecord {
@@ -50,6 +54,31 @@ function normalizeType(type?: MessageType) {
   return type === "loading" ? "info" : type ?? "info";
 }
 
+function userMessageText(content: ReactNode): string {
+  if (typeof content === "string" || typeof content === "number") {
+    return String(content);
+  }
+  return "<non-text user notice>";
+}
+
+function logUserNotice(options: MessageOptions) {
+  if (options.type !== "error" && options.type !== "warning") return;
+  const diagnostic = options.diagnostic;
+  logDiagnostic({
+    level: options.type === "error" ? LOG_LEVEL_ERROR : LOG_LEVEL_WARN,
+    code: diagnostic?.code ?? `UI.${options.type.toUpperCase()}_NOTICE`,
+    scope: diagnostic?.scope ?? `route:${window.location.pathname}`,
+    action: diagnostic?.action ?? "show_user_notice",
+    outcome: diagnostic?.outcome ?? "failed",
+    recoverable: diagnostic?.recoverable ?? true,
+    fallback: diagnostic?.fallback,
+    context: diagnostic?.context,
+    error: diagnostic?.error,
+    traceId: diagnostic?.traceId,
+    userMessage: userMessageText(options.content),
+  });
+}
+
 export function AppMessageProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<MessageRecord[]>([]);
 
@@ -77,7 +106,9 @@ export function AppMessageProvider({ children }: { children: ReactNode }) {
     };
 
     return {
-      open: ({ key, type, content, duration }) => {
+      open: (options) => {
+        const { key, type, content, duration } = options;
+        logUserNotice(options);
         const id = key ?? `${Date.now()}-${Math.random()}`;
         setMessages((prev) => {
           const next = prev.filter((message) => message.id !== id);

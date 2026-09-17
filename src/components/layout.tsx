@@ -36,6 +36,7 @@ import {
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useAppMessage } from "../lib/message";
+import { logHandledError } from "../lib/logger";
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
@@ -111,7 +112,15 @@ export default function BasicLayout({ children }: React.PropsWithChildren) {
     try {
       await openExternal("mailto:923048992@sjtu.edu.cn");
     } catch (error) {
-      console.error("open feedback mail failed", error);
+      logHandledError({
+        code: "SHELL.OPEN_FEEDBACK_FAILED",
+        scope: "layout",
+        action: "open_feedback_mail",
+        error,
+        userMessage: "未能打开反馈邮箱，请确认系统已配置邮件客户端。",
+        recoverable: true,
+        fallback: { used: true, strategy: "show_manual_guidance", result: "success" },
+      });
       messageApi.error("未能打开反馈邮箱，请确认系统已配置邮件客户端。");
     }
   };

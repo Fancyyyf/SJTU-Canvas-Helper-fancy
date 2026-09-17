@@ -500,6 +500,38 @@ CANVAS_TOKEN="你的测试 Token" cargo test --manifest-path src-tauri/Cargo.tom
 
 当前依赖组合若在 `yarn typecheck` 中报告 `react-doc-viewer` 内部路径或 `react-ipynb-renderer` 的 `IpynbType` 导出错误，属于现存的第三方类型兼容问题。不要用 `npx vite build` 的成功替代正式类型检查；发布前应修复或锁定兼容依赖，否则 `yarn tauri build` 会在 `beforeBuildCommand: yarn build` 阶段停止。
 
+#### 视频播放诊断日志
+
+每次点击课程视频都会生成一个随机 `traceId`。前端、Tauri 命令、本地媒体代理和源站请求均使用该 ID 记录同一条播放链路，因此排查时不需要反复重启应用。正常链路依次包含：
+
+```text
+play.requested
+→ play.proxy_url_built
+→ proxy.prepare.begin / proxy.prepare.result
+→ probe.begin
+→ Video proxy CORS preflight（仅 WebView 要求预检时出现）
+→ Video proxy inbound request
+→ Video proxy upstream response
+→ probe.success
+→ player.load_start / player.metadata_loaded / player.can_play / player.playing
+```
+
+异常阶段会记录 `probe.fetch_error`、`probe.http_error`、`webview.csp_violation`、`player.stalled` 或 `player.error`。日志包含协议、主机、端口、路径段数量、扩展名、查询参数名称、Range、HTTP 状态、Content-Type、Content-Length、Content-Range、媒体 `readyState/networkState` 和各阶段耗时，但不会记录签名查询值、Cookie、Token 或 Authorization。代理无法命中路由时也会返回带 CORS 头的 404，并记录 `Video proxy route not found`，避免 WebView 将真实状态折叠成无信息的 `TypeError`。
+
+Windows 默认日志路径为：
+
+```text
+%APPDATA%\SJTU-Canvas-Helper\app.log
+```
+
+PowerShell 可按一次播放的 `traceId` 过滤完整链路：
+
+```powershell
+Select-String -Path "$env:APPDATA\SJTU-Canvas-Helper\app.log" -Pattern "你的-traceId"
+```
+
+若日志文件暂时无法创建或写入，应用会降级为仅输出控制台日志并继续启动，不会因为日志初始化失败而崩溃。
+
 ### 8. 生产构建的工作方式
 
 Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[分发文档](https://v2.tauri.app/distribute/)。由于本项目启用了需要私钥的 Updater 产物，本地不签名冒烟构建使用：

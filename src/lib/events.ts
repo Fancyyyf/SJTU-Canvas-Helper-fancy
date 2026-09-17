@@ -14,6 +14,7 @@ import type {
   FileChatStreamErrorPayload,
   ProgressPayload,
 } from "./model";
+import { logHandledError } from "./logger";
 
 /**
  * 应用级（全局）事件名 → 载荷类型。
@@ -82,7 +83,16 @@ function subscribe<T>(
       }
     })
     .catch((error) => {
-      console.error(`[events] 订阅事件 "${event}" 失败：`, error);
+      logHandledError({
+        code: "EVENT.SUBSCRIBE_FAILED",
+        scope: "events",
+        action: "subscribe",
+        error,
+        userMessage: "后台事件订阅失败，部分实时状态可能无法更新。",
+        recoverable: true,
+        fallback: { used: true, strategy: "continue_without_subscription", result: "success" },
+        context: { event },
+      });
     });
   return () => {
     cancelled = true;

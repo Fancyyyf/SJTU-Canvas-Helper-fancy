@@ -14,8 +14,6 @@ use model::{
     VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
 };
 
-use dirs::config_dir;
-
 use tauri::{Emitter, Runtime, Window};
 use tracing::Level;
 use tracing_subscriber::{
@@ -27,6 +25,7 @@ use crate::app::App;
 mod app;
 mod canvas_agent;
 mod client;
+mod diagnostics;
 mod error;
 mod mcp;
 mod model;
@@ -47,6 +46,11 @@ async fn generate_annual_report(year: i32) -> Result<AnnualReport> {
 #[tauri::command]
 fn read_log_content() -> Result<String> {
     App::read_log_content()
+}
+
+#[tauri::command]
+fn frontend_log(event: diagnostics::FrontendDiagnosticEvent) {
+    diagnostics::emit_frontend_event(event);
 }
 
 #[tauri::command]
@@ -881,13 +885,13 @@ async fn get_canvas_video_info(video_id: String) -> Result<VideoInfo> {
 }
 
 #[tauri::command]
-async fn prepare_proxy() -> Result<bool> {
-    APP.prepare_proxy().await
+async fn prepare_proxy(trace_id: Option<String>) -> Result<bool> {
+    APP.prepare_proxy(trace_id.as_deref()).await
 }
 
 #[tauri::command]
-async fn stop_proxy() {
-    APP.stop_proxy().await
+async fn stop_proxy(trace_id: Option<String>) {
+    APP.stop_proxy(trace_id.as_deref()).await
 }
 
 #[tauri::command]
@@ -991,20 +995,52 @@ async fn stop_mcp_server() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // set up logger
-    let appender = tracing_appender::rolling::never(App::config_dir()?, "app.log");
+    // File logging must never prevent the application from starting. This can
+    // fail when another process temporarily holds the file or the directory is
+    // read-only (for example in a sandbox), so retain stdout logging as a
+    // reliable fallback and report the degraded state there.
+    let log_dir = App::config_dir()?;
+    let max_log_level = if cfg!(debug_assertions) {
+        Level::DEBUG
+    } else {
+        Level::WARN
+    };
+    let (file_layer, file_log_error) =
+        match tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::NEVER)
+            .filename_prefix("app.log")
+            .build(&log_dir)
+        {
+            Ok(appender) => (
+                Some(
+                    fmt::Layer::new()
+                        .with_writer(appender.with_max_level(max_log_level))
+                        .with_ansi(false)
+                        .compact(),
+                ),
+                None,
+            ),
+            Err(error) => (None, Some(error.to_string())),
+        };
     let subscriber = tracing_subscriber::registry()
         .with(
             fmt::Layer::new()
-                .with_writer(std::io::stdout.with_max_level(Level::INFO))
+                .with_writer(std::io::stdout.with_max_level(max_log_level))
                 .pretty(),
         )
-        .with(fmt::Layer::new().with_writer(
-            appender.with_max_level(Level::INFO),
-        ));
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Unable to set a tracing subscriber");
-    tracing::info!("log setup, path: {:?}", config_dir());
+        .with(file_layer);
+    if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Unable to install tracing subscriber: {error}");
+    }
+    if let Some(error) = file_log_error {
+        tracing::warn!(
+            log_dir = %log_dir,
+            %error,
+            "File logging unavailable; continuing with console logging"
+        );
+    } else {
+        tracing::info!(log_dir = %log_dir, "File logging initialized");
+    }
 
     APP.init().await?;
     if APP.get_config().await.mcp_enabled {
@@ -1018,6 +1054,7 @@ async fn main() -> Result<()> {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             read_log_content,
+            frontend_log,
             console_log,
             is_ffmpeg_installed,
             run_video_aggregate,
@@ -1136,7 +1173,7 @@ async fn main() -> Result<()> {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
                         APP.stop_mcp().await;
-                        APP.stop_proxy().await;
+                        APP.stop_proxy(None).await;
                         APP.stop_attendance_watch(None).await;
                     });
                 });

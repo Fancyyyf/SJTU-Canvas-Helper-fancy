@@ -25,6 +25,8 @@ import { surfaceCardSx, innerBoxSx } from "../lib/styles";
 import BasicLayout from "../components/layout";
 import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
 import { QRCodeScanResult } from "../lib/model";
+import { useAppMessage } from "../lib/message";
+import { logHandledError } from "../lib/logger";
 
 export default function QRCodePage() {
   const theme = useTheme();
@@ -34,6 +36,7 @@ export default function QRCodePage() {
   const [keyword, setKeyword] = useState("");
   const [previewImage, setPreviewImage] = useState<QRCodeScanResult | null>(null);
   const courses = useCourses();
+  const [messageApi] = useAppMessage();
 
   const handleGetQRCode = async (courseId: number) => {
     setOperating(true);
@@ -43,7 +46,17 @@ export default function QRCodePage() {
       })) as QRCodeScanResult[];
       setScanResults(nextScanResults);
     } catch (error) {
-      console.error(error);
+      logHandledError({
+        code: "QRCODE.SCAN_FAILED",
+        scope: "qrcode",
+        action: "scan_course_files",
+        error,
+        userMessage: "二维码扫描失败，请稍后重试。",
+        recoverable: true,
+        fallback: { used: true, strategy: "keep_previous_results", result: "success" },
+        context: { courseId },
+      });
+      messageApi.error("二维码扫描失败，请稍后重试。");
     }
     setOperating(false);
   };

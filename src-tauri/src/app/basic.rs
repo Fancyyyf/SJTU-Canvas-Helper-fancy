@@ -13,7 +13,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Runtime, Window};
 use tokio::{io::AsyncReadExt, process::Command as TokioCommand};
@@ -40,17 +40,48 @@ use super::{
 const MY_CANVAS_FILES_FOLDER_NAME: &str = "我的Canvas文件";
 
 async fn proxy_video_request(
+    trace_id: String,
+    route_name: &'static str,
     upstream_base: &'static str,
     referer: &'static str,
     tail: warp::path::Tail,
     query: String,
     headers: warp::http::HeaderMap,
 ) -> std::result::Result<Response<warp::hyper::Body>, Infallible> {
+    let started = Instant::now();
     let range_value = headers
         .get("Range")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let path = tail.as_str();
+    let path_segments = path.split('/').filter(|segment| !segment.is_empty()).count();
+    let extension = path
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.rsplit_once('.').map(|(_, extension)| extension))
+        .unwrap_or("<none>");
+    let query_names = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('=').map(|(name, _)| name).or(Some(pair)))
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    tracing::info!(
+        %trace_id,
+        route = route_name,
+        method = "GET",
+        path_segments,
+        extension,
+        query_names = if query_names.is_empty() { "<none>" } else { &query_names },
+        range = if range_value.is_empty() { "<none>" } else { &range_value },
+        origin = headers
+            .get("origin")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<missing>"),
+        "Video proxy inbound request"
+    );
 
     let mut url = format!("{upstream_base}/{}", tail.as_str());
     if !query.is_empty() {
@@ -74,11 +105,28 @@ async fn proxy_video_request(
                 .unwrap_or("<missing>")
                 .to_owned();
             let has_content_range = response.headers().contains_key("content-range");
+            let content_length = response
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_owned();
+            let content_range = response
+                .headers()
+                .get("content-range")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_owned();
             tracing::info!(
+                %trace_id,
+                route = route_name,
                 upstream = upstream_base,
                 %status,
                 %content_type,
                 has_content_range,
+                %content_length,
+                %content_range,
+                elapsed_ms = started.elapsed().as_millis(),
                 "Video proxy upstream response"
             );
             let mut builder = Response::builder().status(status);
@@ -106,16 +154,28 @@ async fn proxy_video_request(
                 "Accept-Ranges, Content-Length, Content-Range, Content-Type",
             );
             builder = builder.header("Accept-Ranges", "bytes");
-            let stream = response
-                .bytes_stream()
-                .map(|chunk| chunk.map_err(std::io::Error::other));
+            let stream_trace_id = trace_id.clone();
+            let stream = response.bytes_stream().map(move |chunk| {
+                chunk.map_err(|error| {
+                    tracing::error!(
+                        trace_id = %stream_trace_id,
+                        route = route_name,
+                        error = %error,
+                        "Video proxy response stream failed"
+                    );
+                    std::io::Error::other(error)
+                })
+            });
             let body = warp::hyper::Body::wrap_stream(stream);
             Ok(builder.body(body).unwrap())
         }
         Err(error) => {
             tracing::error!(
+                %trace_id,
+                route = route_name,
                 upstream = upstream_base,
                 error = %error,
+                elapsed_ms = started.elapsed().as_millis(),
                 "Video proxy upstream request failed"
             );
             Ok(Response::builder()
@@ -319,7 +379,7 @@ impl App {
         let mut config = self.get_config().await;
         let cookies = &config.video_cookies;
         if !cookies.is_empty() {
-            tracing::info!("Detected saved cookies: {}", cookies);
+            tracing::info!(cookie_present = true, cookie_length = cookies.len(), "Detected saved video cookies");
             self.client.init_cookie(cookies);
             if let Ok(Some(consumer_key)) = self.client.get_oauth_consumer_key().await {
                 config.oauth_consumer_key = consumer_key;
@@ -329,46 +389,85 @@ impl App {
         Ok(())
     }
 
-    async fn wait_proxy_ready(&self, proxy_port: u16) -> Result<bool> {
+    async fn wait_proxy_ready(&self, proxy_port: u16, trace_id: &str) -> Result<bool> {
         let url = format!("http://127.0.0.1:{proxy_port}/ready");
         let timeout_cnt = 10;
         let mut cnt = 0;
+        let started = Instant::now();
         loop {
-            if let Ok(response) = reqwest::get(&url).await {
-                if response.status() == 200 {
-                    tracing::info!("Proxy ready check success");
+            match reqwest::get(&url).await {
+                Ok(response) if response.status() == 200 => {
+                    tracing::info!(
+                        %trace_id,
+                        proxy_port,
+                        attempts = cnt + 1,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "Video proxy ready check succeeded"
+                    );
                     break Ok(true);
                 }
+                Ok(response) => tracing::warn!(
+                    %trace_id,
+                    proxy_port,
+                    attempt = cnt + 1,
+                    status = %response.status(),
+                    "Video proxy ready check returned unexpected status"
+                ),
+                Err(error) => tracing::warn!(
+                    %trace_id,
+                    proxy_port,
+                    attempt = cnt + 1,
+                    error = %error,
+                    "Video proxy ready check connection failed"
+                ),
             }
             cnt += 1;
             if cnt >= timeout_cnt {
-                tracing::info!("Proxy ready check timeout");
+                tracing::error!(
+                    %trace_id,
+                    proxy_port,
+                    attempts = cnt,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Video proxy ready check timed out"
+                );
                 break Ok(false);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    pub async fn prepare_proxy(&self) -> Result<bool> {
+    pub async fn prepare_proxy(&self, trace_id: Option<&str>) -> Result<bool> {
+        let trace_id = trace_id.unwrap_or("unscoped");
+        tracing::info!(%trace_id, "Video proxy prepare requested");
         {
             let mut handle = self.handle.write().await;
             if let Some(proxy) = handle.as_ref() {
                 if !proxy.is_finished() {
+                    let proxy_port = self.config.read().await.proxy_port;
+                    tracing::info!(%trace_id, proxy_port, "Video proxy reused existing server");
                     return Ok(true);
                 }
+                tracing::warn!(%trace_id, "Video proxy task had exited; restarting");
                 *handle = None;
             }
         }
         let proxy_port = self.config.read().await.proxy_port;
+        tracing::info!(%trace_id, proxy_port, bind = "127.0.0.1", "Video proxy starting");
 
-        // Proxy Endpoint: /vod/*
-        let legacy_video_proxy = warp::get()
-            .and(warp::path("vod").and(warp::path::tail()))
+        // The first two path segments are a fixed route and a playback trace
+        // id. The remaining path is forwarded unchanged to the allow-listed
+        // upstream host, so source paths do not need to begin with `/vod`.
+        let live_video_proxy = warp::get()
+            .and(warp::path("live-media"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::tail())
             .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
             .and(warp::header::headers_cloned())
-            .and_then(|tail, query, headers| {
+            .and_then(|trace_id, tail, query, headers| {
                 proxy_video_request(
-                    "https://live.sjtu.edu.cn/vod",
+                    trace_id,
+                    "live-media",
+                    "https://live.sjtu.edu.cn",
                     "https://courses.sjtu.edu.cn",
                     tail,
                     query,
@@ -376,12 +475,16 @@ impl App {
                 )
             });
         let canvas_video_proxy = warp::get()
-            .and(warp::path("canvas-vod").and(warp::path::tail()))
+            .and(warp::path("canvas-media"))
+            .and(warp::path::param::<String>())
+            .and(warp::path::tail())
             .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
             .and(warp::header::headers_cloned())
-            .and_then(|tail, query, headers| {
+            .and_then(|trace_id, tail, query, headers| {
                 proxy_video_request(
-                    "https://videos.sjtu.edu.cn/vod",
+                    trace_id,
+                    "canvas-media",
+                    "https://videos.sjtu.edu.cn",
                     "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/",
                     tail,
                     query,
@@ -395,7 +498,19 @@ impl App {
             warp::options()
                 .and(warp::path::full())
                 .map(|path: warp::path::FullPath| {
-                    tracing::info!(path = path.as_str(), "Video proxy CORS preflight");
+                    let mut segments = path
+                        .as_str()
+                        .trim_start_matches('/')
+                        .split('/')
+                        .filter(|segment| !segment.is_empty());
+                    let route = segments.next().unwrap_or("<missing>");
+                    let trace_id = segments.next().unwrap_or("unscoped");
+                    tracing::info!(
+                        %trace_id,
+                        route,
+                        path_segments = segments.count() + 2,
+                        "Video proxy CORS preflight"
+                    );
                     Response::builder()
                         .status(StatusCode::NO_CONTENT)
                         .header("Access-Control-Allow-Origin", "*")
@@ -411,22 +526,46 @@ impl App {
                 });
         // Ready Check Endpoint: /ready
         let ready_check = warp::path!("ready").map(|| Response::builder().body(""));
+        let proxy_not_found = warp::any()
+            .and(warp::method())
+            .and(warp::path::full())
+            .map(|method: warp::http::Method, path: warp::path::FullPath| {
+                tracing::warn!(
+                    method = %method,
+                    path = path.as_str(),
+                    "Video proxy route not found"
+                );
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Private-Network", "true")
+                    .body(warp::hyper::Body::from("Video proxy route not found"))
+                    .unwrap()
+            });
 
         let routes = proxy_preflight
-            .or(legacy_video_proxy)
+            .or(live_video_proxy)
             .or(canvas_video_proxy)
-            .or(ready_check);
+            .or(ready_check)
+            .or(proxy_not_found);
         let handle = tokio::spawn(warp::serve(routes).run(([127, 0, 0, 1], proxy_port)));
         *self.handle.write().await = Some(handle);
 
-        self.wait_proxy_ready(proxy_port).await
+        self.wait_proxy_ready(proxy_port, trace_id).await
     }
 
-    pub async fn stop_proxy(&self) {
+    pub async fn stop_proxy(&self, trace_id: Option<&str>) {
+        let trace_id = trace_id.unwrap_or("unscoped");
         let mut handle = self.handle.write().await;
         if let Some(handle) = handle.as_ref() {
-            tracing::info!("stop proxy");
+            tracing::info!(
+                %trace_id,
+                task_finished = handle.is_finished(),
+                "Video proxy stopping"
+            );
             handle.abort();
+        } else {
+            tracing::info!(%trace_id, "Video proxy stop requested with no active server");
         }
         *handle = None;
     }

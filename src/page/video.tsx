@@ -53,6 +53,7 @@ import { VIDEO_PAGE_HINT_ALERT_KEY } from "../lib/constants";
 import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
 import { useTauriEvent } from "../lib/events";
+import { logDiagnostic, logHandledError } from "../lib/logger";
 import {
   CanvasVideo,
   DownloadTask,
@@ -63,7 +64,7 @@ import {
   VideoInfo,
   VideoPlayInfo,
 } from "../lib/model";
-import { consoleLog, srtToVtt } from "../lib/utils";
+import { srtToVtt } from "../lib/utils";
 
 import { surfaceCardSx } from "../lib/styles";
 
@@ -83,6 +84,72 @@ function isSubtitleUnavailableError(error: unknown): boolean {
 
 function isVideoUnavailableError(error: unknown): boolean {
   return String(error).includes("No playable video source");
+}
+
+function createPlaybackTraceId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function describePlaybackUrl(value: string): Record<string, unknown> {
+  try {
+    const url = new URL(value);
+    const pathSegments = url.pathname.split("/").filter(Boolean);
+    const lastSegment = pathSegments[pathSegments.length - 1] ?? "";
+    const extensionSegments = lastSegment.split(".");
+    return {
+      valid: true,
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || "<default>",
+      pathSegments: pathSegments.length,
+      extension: lastSegment.includes(".")
+        ? extensionSegments[extensionSegments.length - 1]?.toLowerCase()
+        : "<none>",
+      queryParameterNames: [...new Set(url.searchParams.keys())].sort(),
+    };
+  } catch {
+    return { valid: false, present: Boolean(value) };
+  }
+}
+
+function describeMediaState(player: HTMLMediaElement | null): Record<string, unknown> {
+  if (!player) return { present: false };
+  const buffered = Array.from({ length: player.buffered.length }, (_, index) => ({
+    start: player.buffered.start(index),
+    end: player.buffered.end(index),
+  }));
+  return {
+    present: true,
+    readyState: player.readyState,
+    networkState: player.networkState,
+    paused: player.paused,
+    ended: player.ended,
+    currentTime: player.currentTime,
+    duration: Number.isFinite(player.duration) ? player.duration : null,
+    buffered,
+    videoWidth: player instanceof HTMLVideoElement ? player.videoWidth : undefined,
+    videoHeight: player instanceof HTMLVideoElement ? player.videoHeight : undefined,
+  };
+}
+
+function logPlayback(
+  traceId: string,
+  phase: string,
+  details: Record<string, unknown> = {},
+  error = false
+) {
+  logDiagnostic({
+    level: error ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
+    code: `VIDEO.${phase.replace(/\./g, "_").toUpperCase()}`,
+    scope: "video.playback",
+    action: phase,
+    outcome: error ? "failed" : phase.endsWith("begin") ? "started" : "success",
+    recoverable: true,
+    traceId,
+    context: details,
+  });
 }
 
 export default function VideoPage() {
@@ -117,6 +184,7 @@ export default function VideoPage() {
   const subVideoRef = useRef<HTMLVideoElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const firstPlay = useRef(true);
+  const playbackTraceIdRef = useRef("unscoped");
   const activeSummaryRequestIdRef = useRef<string | null>(null);
 
   const LinkRenderer = (props: any) => (
@@ -154,7 +222,15 @@ export default function VideoPage() {
       await invoke("login_canvas_website");
       return true;
     } catch (error) {
-      consoleLog(LOG_LEVEL_ERROR, error);
+      logHandledError({
+        code: "VIDEO.LOGIN_SESSION_UNAVAILABLE",
+        scope: "video",
+        action: "login_canvas_website",
+        error,
+        userMessage: "视频登录状态不可用，请重新完成额外登录。",
+        recoverable: true,
+        fallback: { used: true, strategy: "show_login_required_state", result: "success" },
+      });
       return false;
     }
   };
@@ -163,8 +239,29 @@ export default function VideoPage() {
     void loginAndCheck();
     return () => {
       if (!firstPlay.current) {
-        void invoke("stop_proxy");
+        void invoke("stop_proxy", { traceId: playbackTraceIdRef.current });
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleSecurityPolicyViolation = (event: SecurityPolicyViolationEvent) => {
+      logPlayback(
+        playbackTraceIdRef.current,
+        "webview.csp_violation",
+        {
+          effectiveDirective: event.effectiveDirective,
+          violatedDirective: event.violatedDirective,
+          disposition: event.disposition,
+          blockedResource: describePlaybackUrl(event.blockedURI),
+          documentOrigin: window.location.origin,
+        },
+        true
+      );
+    };
+    window.addEventListener("securitypolicyviolation", handleSecurityPolicyViolation);
+    return () => {
+      window.removeEventListener("securitypolicyviolation", handleSecurityPolicyViolation);
     };
   }, []);
 
@@ -527,19 +624,32 @@ export default function VideoPage() {
     }
   };
 
-  const getVidePlayURL = (play: VideoPlayInfo, proxyPort: number) =>
-    play.rtmpUrlHdv
-      .replace(
-        "https://videos.sjtu.edu.cn/vod",
-        `http://localhost:${proxyPort}/canvas-vod`
-      )
-      .replace(
-        "https://live.sjtu.edu.cn",
-        `http://localhost:${proxyPort}`
-      );
+  const getVidePlayURL = (
+    play: VideoPlayInfo,
+    proxyPort: number,
+    traceId: string
+  ): string => {
+    try {
+      const rawURL = play.rtmpUrlHdv.trim();
+      const source = new URL(rawURL.startsWith("//") ? `https:${rawURL}` : rawURL);
+      const proxyBase = `http://127.0.0.1:${proxyPort}`;
 
-  const checkOrStartProxy = async (): Promise<boolean> => {
+      if (source.hostname.toLowerCase() === "videos.sjtu.edu.cn") {
+        return `${proxyBase}/canvas-media/${traceId}${source.pathname}${source.search}`;
+      }
+      if (source.hostname.toLowerCase() === "live.sjtu.edu.cn") {
+        return `${proxyBase}/live-media/${traceId}${source.pathname}${source.search}`;
+      }
+    } catch {
+      // The caller displays a user-facing error for malformed source URLs.
+    }
+    return "";
+  };
+
+  const checkOrStartProxy = async (traceId: string): Promise<boolean> => {
     const showPreparing = firstPlay.current;
+    const started = performance.now();
+    logPlayback(traceId, "proxy.prepare.begin", { showPreparing });
     if (showPreparing) {
       messageApi.open({
         key: "proxy_preparing",
@@ -550,7 +660,11 @@ export default function VideoPage() {
     }
 
     try {
-      const succeed = (await invoke("prepare_proxy")) as boolean;
+      const succeed = (await invoke("prepare_proxy", { traceId })) as boolean;
+      logPlayback(traceId, "proxy.prepare.result", {
+        succeed,
+        elapsedMs: Math.round(performance.now() - started),
+      });
       if (succeed) {
         messageApi.destroy("proxy_preparing");
         if (showPreparing) {
@@ -562,28 +676,51 @@ export default function VideoPage() {
       messageApi.destroy("proxy_preparing");
       messageApi.error("反向代理启动超时，已取消播放");
     } catch (error) {
+      logPlayback(
+        traceId,
+        "proxy.prepare.error",
+        {
+          elapsedMs: Math.round(performance.now() - started),
+          errorType: error instanceof Error ? error.name : typeof error,
+        },
+        true
+      );
       messageApi.destroy("proxy_preparing");
       messageApi.error(`反向代理启动失败：${error}`);
     }
     firstPlay.current = true;
-    await invoke("stop_proxy").catch(() => undefined);
+    await invoke("stop_proxy", { traceId }).catch(() => undefined);
     return false;
   };
 
-  const probeVideoSource = async (playURL: string): Promise<boolean> => {
+  const probeVideoSource = async (playURL: string, traceId: string): Promise<boolean> => {
+    const started = performance.now();
+    logPlayback(traceId, "probe.begin", {
+      target: describePlaybackUrl(playURL),
+      documentOrigin: window.location.origin,
+      secureContext: window.isSecureContext,
+      online: navigator.onLine,
+    });
     try {
       const response = await fetch(playURL, {
         cache: "no-store",
         headers: { Range: "bytes=0-1" },
       });
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      const responseMetadata = {
+        status: response.status,
+        statusText: response.statusText,
+        responseType: response.type,
+        contentType: contentType || "<missing>",
+        contentLength: response.headers.get("content-length") ?? "<missing>",
+        contentRange: response.headers.get("content-range") ?? "<missing>",
+        acceptRanges: response.headers.get("accept-ranges") ?? "<missing>",
+        elapsedMs: Math.round(performance.now() - started),
+      };
       await response.body?.cancel();
 
       if (!response.ok) {
-        consoleLog(LOG_LEVEL_ERROR, "Video proxy probe failed", {
-          status: response.status,
-          contentType: contentType || "<missing>",
-        });
+        logPlayback(traceId, "probe.http_error", responseMetadata, true);
         messageApi.error(`视频代理返回异常状态（HTTP ${response.status}），已取消播放`);
         return false;
       }
@@ -594,31 +731,73 @@ export default function VideoPage() {
         contentType.includes("mp4") ||
         contentType.includes("octet-stream");
       if (!looksLikeVideo) {
-        consoleLog(LOG_LEVEL_ERROR, "Video proxy returned non-video content", {
-          status: response.status,
-          contentType,
-        });
+        logPlayback(traceId, "probe.non_video_response", responseMetadata, true);
         messageApi.error(`视频代理返回了非视频内容（${contentType}），已取消播放`);
         return false;
       }
 
-      consoleLog(LOG_LEVEL_INFO, "Video proxy probe succeeded", {
-        status: response.status,
-        contentType: contentType || "<missing>",
-      });
+      logPlayback(traceId, "probe.success", responseMetadata);
       return true;
     } catch (error) {
-      consoleLog(LOG_LEVEL_ERROR, "Video proxy probe could not reach local proxy", {
-        errorType: error instanceof Error ? error.name : typeof error,
-      });
+      let sourceMetadata: Record<string, unknown> = { valid: false };
+      try {
+        const source = new URL(playURL);
+        sourceMetadata = {
+          valid: true,
+          protocol: source.protocol,
+          hostname: source.hostname,
+          port: source.port,
+          proxyRoute: source.pathname.startsWith("/canvas-media/")
+            ? "canvas-media"
+            : source.pathname.startsWith("/live-media/")
+              ? "live-media"
+              : "unknown",
+        };
+      } catch {
+        // Keep the diagnostic free of the original signed URL.
+      }
+      logPlayback(
+        traceId,
+        "probe.fetch_error",
+        {
+          elapsedMs: Math.round(performance.now() - started),
+          errorType: error instanceof Error ? error.name : typeof error,
+          source: sourceMetadata,
+        },
+        true
+      );
       messageApi.error("WebView 无法访问本地视频代理，已取消播放；请重启应用后重试");
       return false;
     }
   };
 
   const handlePlay = async (play: VideoPlayInfo) => {
+    const traceId = createPlaybackTraceId();
+    playbackTraceIdRef.current = traceId;
+    const sourceMetadata = describePlaybackUrl(play.rtmpUrlHdv);
+    logPlayback(traceId, "play.requested", {
+      playId: play.id,
+      viewNumber: play.cdviViewNum,
+      source: sourceMetadata,
+      documentOrigin: window.location.origin,
+      userAgent: navigator.userAgent,
+    });
     const config = await getConfig();
-    const playURL = getVidePlayURL(play, config.proxy_port);
+    const playURL = getVidePlayURL(play, config.proxy_port, traceId);
+    if (!playURL) {
+      messageApi.error("学校返回的视频地址无效或来源暂不受支持，已取消播放");
+      logPlayback(
+        traceId,
+        "play.unsupported_source",
+        { source: sourceMetadata },
+        true
+      );
+      return;
+    }
+    logPlayback(traceId, "play.proxy_url_built", {
+      proxy: describePlaybackUrl(playURL),
+      proxyPort: config.proxy_port,
+    });
     if (playURL === mainPlayURL || playURL === mutedPlayURL) {
       messageApi.warning("已经在播放啦");
       return;
@@ -627,10 +806,10 @@ export default function VideoPage() {
       messageApi.error("目前只支持双屏观看");
       return;
     }
-    if (!(await checkOrStartProxy())) {
+    if (!(await checkOrStartProxy(traceId))) {
       return;
     }
-    if (!(await probeVideoSource(playURL))) {
+    if (!(await probeVideoSource(playURL, traceId))) {
       return;
     }
 
@@ -681,38 +860,49 @@ export default function VideoPage() {
   const handleMainVideoError = () => {
     const player = mainVideoRef.current;
     const detail = describeMediaError(player?.error ?? null);
-    let sourceMetadata: Record<string, unknown>;
-    try {
-      const source = new URL(player?.currentSrc || mainPlayURL);
-      sourceMetadata = {
-        present: true,
-        protocol: source.protocol,
-        hostname: source.hostname,
-        port: source.port,
-        isMp4Path: source.pathname.toLowerCase().endsWith(".mp4"),
-        hasQuery: source.search.length > 0,
-      };
-    } catch {
-      sourceMetadata = { present: Boolean(player?.currentSrc || mainPlayURL), valid: false };
-    }
     setPlaybackLoading(false);
     setPlaybackError(detail);
-    consoleLog(LOG_LEVEL_ERROR, "Video player error", detail, sourceMetadata);
+    logPlayback(
+      playbackTraceIdRef.current,
+      "player.error",
+      {
+        detail,
+        mediaErrorCode: player?.error?.code ?? null,
+        mediaErrorMessage: player?.error?.message || "<missing>",
+        source: describePlaybackUrl(player?.currentSrc || mainPlayURL),
+        media: describeMediaState(player),
+      },
+      true
+    );
   };
 
   const tryStartMainVideo = async () => {
     const player = mainVideoRef.current;
     if (!player) return;
     setPlaybackLoading(false);
+    logPlayback(playbackTraceIdRef.current, "player.play_attempt", {
+      media: describeMediaState(player),
+    });
     try {
       await player.play();
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
+        logPlayback(playbackTraceIdRef.current, "player.play_aborted", {
+          media: describeMediaState(player),
+        });
         return;
       }
       // Chromium may still require a direct click on the native control when
       // autoplay with sound is blocked. The media itself remains loaded.
-      consoleLog(LOG_LEVEL_ERROR, "Video autoplay was blocked", error);
+      logPlayback(
+        playbackTraceIdRef.current,
+        "player.play_rejected",
+        {
+          errorType: error instanceof Error ? error.name : typeof error,
+          media: describeMediaState(player),
+        },
+        true
+      );
       setPlaybackError(
         error instanceof DOMException && error.name === "NotAllowedError"
           ? "视频已加载，请点击播放器中央的播放按钮开始播放。"
@@ -1245,23 +1435,69 @@ export default function VideoPage() {
                           autoPlay
                           src={mainPlayURL}
                           muted={false}
-                          onLoadStart={() => {
+                          onLoadStart={(event) => {
                             setPlaybackLoading(true);
                             setPlaybackError("");
-                          }}
-                          onCanPlay={() => void tryStartMainVideo()}
-                          onPlaying={() => {
-                            setPlaybackLoading(false);
-                            setPlaybackError("");
-                          }}
-                          onLoadedMetadata={(event) => {
-                            consoleLog(LOG_LEVEL_INFO, "Video metadata loaded", {
-                              duration: event.currentTarget.duration,
-                              width: event.currentTarget.videoWidth,
-                              height: event.currentTarget.videoHeight,
+                            logPlayback(playbackTraceIdRef.current, "player.load_start", {
+                              source: describePlaybackUrl(event.currentTarget.currentSrc),
+                              media: describeMediaState(event.currentTarget),
                             });
                           }}
-                          onWaiting={() => setPlaybackLoading(true)}
+                          onCanPlay={(event) => {
+                            logPlayback(playbackTraceIdRef.current, "player.can_play", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                            void tryStartMainVideo();
+                          }}
+                          onPlaying={(event) => {
+                            setPlaybackLoading(false);
+                            setPlaybackError("");
+                            logPlayback(playbackTraceIdRef.current, "player.playing", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
+                          onLoadedMetadata={(event) => {
+                            logPlayback(playbackTraceIdRef.current, "player.metadata_loaded", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
+                          onLoadedData={(event) => {
+                            logPlayback(playbackTraceIdRef.current, "player.data_loaded", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
+                          onWaiting={(event) => {
+                            setPlaybackLoading(true);
+                            logPlayback(playbackTraceIdRef.current, "player.waiting", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
+                          onStalled={(event) => {
+                            logPlayback(
+                              playbackTraceIdRef.current,
+                              "player.stalled",
+                              { media: describeMediaState(event.currentTarget) },
+                              true
+                            );
+                          }}
+                          onSuspend={(event) => {
+                            logPlayback(playbackTraceIdRef.current, "player.suspended", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
+                          onAbort={(event) => {
+                            logPlayback(
+                              playbackTraceIdRef.current,
+                              "player.aborted",
+                              { media: describeMediaState(event.currentTarget) },
+                              true
+                            );
+                          }}
+                          onEmptied={(event) => {
+                            logPlayback(playbackTraceIdRef.current, "player.emptied", {
+                              media: describeMediaState(event.currentTarget),
+                            });
+                          }}
                           onError={handleMainVideoError}
                           width="100%"
                           style={{
