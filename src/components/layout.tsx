@@ -2,6 +2,7 @@
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import ArticleRoundedIcon from "@mui/icons-material/ArticleRounded";
 import AssignmentRoundedIcon from "@mui/icons-material/AssignmentRounded";
+import HowToRegRoundedIcon from "@mui/icons-material/HowToRegRounded";
 import AutoStoriesRoundedIcon from "@mui/icons-material/AutoStoriesRounded";
 import CalendarMonthRoundedIcon from "@mui/icons-material/CalendarMonthRounded";
 import ChevronLeftRoundedIcon from "@mui/icons-material/ChevronLeftRounded";
@@ -48,6 +49,7 @@ const collapsedDrawerWidth = 92;
 
 const navigationItems = [
   { key: "agent", label: "Canvas Agent", icon: <PsychologyRoundedIcon />, path: "/agent" },
+  { key: "attendance", label: "签到守望", icon: <HowToRegRoundedIcon />, path: "/attendance" },
   { key: "files", label: "文件管理", icon: <ArticleRoundedIcon />, path: "/files" },
   { key: "assignments", label: "作业列表", icon: <AssignmentRoundedIcon />, path: "/assignments" },
   { key: "discussions", label: "讨论管理", icon: <ForumRoundedIcon />, path: "/discussions" },
@@ -64,6 +66,7 @@ const navigationItems = [
 
 const pageTitleMap: Record<string, string> = {
   agent: "Canvas Agent",
+  attendance: "签到守望",
   files: "文件管理",
   assignments: "作业列表",
   discussions: "讨论管理",

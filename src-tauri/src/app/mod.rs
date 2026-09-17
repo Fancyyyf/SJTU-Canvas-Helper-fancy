@@ -7,6 +7,7 @@ use crate::{
     model::{Account, AppConfig},
 };
 pub mod annual;
+pub mod attendance;
 pub mod basic;
 pub mod cache;
 mod constants;
@@ -19,6 +20,8 @@ pub struct App {
     config: RwLock<AppConfig>,
     handle: RwLock<Option<JoinHandle<()>>>,
     mcp_handle: RwLock<Option<JoinHandle<()>>>,
+    attendance_handle: RwLock<Option<JoinHandle<()>>>,
+    attendance_status: RwLock<crate::model::AttendanceWatchStatus>,
     cache: Cache,
 }
 

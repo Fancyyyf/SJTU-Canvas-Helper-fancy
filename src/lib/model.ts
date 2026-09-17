@@ -295,6 +295,11 @@ export interface AppConfig {
     serve_as_plaintext: string;
     oauth_consumer_key: string;
     ja_auth_cookie: string;
+    attendance_password_login_enabled: boolean;
+    attendance_username: string;
+    attendance_password: string;
+    attendance_risk_delay_ms: number;
+    attendance_python_command: string;
     video_cookies: string;
     proxy_port: number;
     course_assignment_file_bindings: Record<number, File[]>;
@@ -519,6 +524,53 @@ export interface GradeStatus {
 export interface QRCodeScanResult {
     file: File,
     contents: string[];
+}
+
+export interface AttendanceWatchStatus {
+    running: boolean;
+    intervalMs: number;
+    startedAt?: Option<string>;
+    lastScanAt?: Option<string>;
+    lastDetectedAt?: Option<string>;
+    scanCount: number;
+    detectedCount: number;
+    duplicateCount: number;
+    successCount: number;
+    failureCount: number;
+    lastQrContent?: Option<string>;
+    lastMessage: string;
+}
+
+export type AttendanceEventKind =
+    | "started"
+    | "stopped"
+    | "detected"
+    | "success"
+    | "failed"
+    | "error"
+    | "info";
+
+export interface AttendanceEventPayload {
+    kind: AttendanceEventKind;
+    timestamp: string;
+    message: string;
+    qrContent?: Option<string>;
+}
+
+export interface AttendanceSignResult {
+    success: boolean;
+    message: string;
+    qrUrl: string;
+    responseStatus: number;
+    responseBody: string;
+}
+
+export interface AttendancePythonStatus {
+    available: boolean;
+    interpreter: string;
+    version: string;
+    moduleDir: string;
+    message: string;
 }
 
 export interface DiscussionTopic {

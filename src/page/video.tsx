@@ -14,6 +14,7 @@ import {
   Card,
   CardContent,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -47,7 +48,7 @@ import VideoAggregator from "../components/video_aggregator";
 import VideoDownloadTable from "../components/video_download_table";
 import { WorkspaceHero } from "../components/workspace_hero";
 import videoStyles from "../css/video_player.module.css";
-import { getConfig, saveConfig } from "../lib/config";
+import { getConfig } from "../lib/config";
 import { VIDEO_PAGE_HINT_ALERT_KEY } from "../lib/constants";
 import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
 import { useAppMessage } from "../lib/message";
@@ -57,6 +58,7 @@ import {
   DownloadTask,
   LLMChatMessage,
   LOG_LEVEL_ERROR,
+  LOG_LEVEL_INFO,
   VideoDownloadTask,
   VideoInfo,
   VideoPlayInfo,
@@ -98,6 +100,8 @@ export default function VideoPage() {
   const [playURLs, setPlayURLs] = useState<string[]>([]);
   const [mainPlayURL, setMainPlayURL] = useState("");
   const [mutedPlayURL, setMutedPlayURL] = useState("");
+  const [playbackLoading, setPlaybackLoading] = useState(false);
+  const [playbackError, setPlaybackError] = useState("");
   const [syncPlay, setSyncPlay] = useState(true);
   const [subVideoSize, setSubVideoSize] = useState<number>(25);
   const [subVideoOpacity, setSubVideoOpacity] = useState(0.8);
@@ -236,14 +240,10 @@ export default function VideoPage() {
   });
 
   const loginAndCheck = async (retry = false) => {
-    const config = await getConfig(true);
     const success = await handleLoginWebsite();
-    if (!success) {
-      config.ja_auth_cookie = "";
-      await saveConfig(config);
-    } else if (!retry) {
+    if (success && !retry) {
       messageApi.success("检测到登录会话，登录成功", 0.5);
-    } else {
+    } else if (success) {
       messageApi.success("登录成功", 0.5);
     }
     setNotLogin(!success);
@@ -538,28 +538,81 @@ export default function VideoPage() {
         `http://localhost:${proxyPort}`
       );
 
-  const checkOrStartProxy = async () => {
-    if (firstPlay.current) {
+  const checkOrStartProxy = async (): Promise<boolean> => {
+    const showPreparing = firstPlay.current;
+    if (showPreparing) {
       messageApi.open({
         key: "proxy_preparing",
         type: "loading",
         content: "正在启动反向代理...",
         duration: 0,
       });
-      let succeed;
-      try {
-        succeed = (await invoke("prepare_proxy")) as boolean;
-      } catch (error) {
-        messageApi.error(`反向代理启动失败：${error}`);
-      }
+    }
+
+    try {
+      const succeed = (await invoke("prepare_proxy")) as boolean;
       if (succeed) {
         messageApi.destroy("proxy_preparing");
-        messageApi.success("反向代理启动成功", 0.5);
-      } else {
-        messageApi.error("反向代理启动超时");
-        void invoke("stop_proxy");
+        if (showPreparing) {
+          messageApi.success("反向代理启动成功", 0.5);
+        }
+        firstPlay.current = false;
+        return true;
       }
-      firstPlay.current = false;
+      messageApi.destroy("proxy_preparing");
+      messageApi.error("反向代理启动超时，已取消播放");
+    } catch (error) {
+      messageApi.destroy("proxy_preparing");
+      messageApi.error(`反向代理启动失败：${error}`);
+    }
+    firstPlay.current = true;
+    await invoke("stop_proxy").catch(() => undefined);
+    return false;
+  };
+
+  const probeVideoSource = async (playURL: string): Promise<boolean> => {
+    try {
+      const response = await fetch(playURL, {
+        cache: "no-store",
+        headers: { Range: "bytes=0-1" },
+      });
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      await response.body?.cancel();
+
+      if (!response.ok) {
+        consoleLog(LOG_LEVEL_ERROR, "Video proxy probe failed", {
+          status: response.status,
+          contentType: contentType || "<missing>",
+        });
+        messageApi.error(`视频代理返回异常状态（HTTP ${response.status}），已取消播放`);
+        return false;
+      }
+
+      const looksLikeVideo =
+        !contentType ||
+        contentType.startsWith("video/") ||
+        contentType.includes("mp4") ||
+        contentType.includes("octet-stream");
+      if (!looksLikeVideo) {
+        consoleLog(LOG_LEVEL_ERROR, "Video proxy returned non-video content", {
+          status: response.status,
+          contentType,
+        });
+        messageApi.error(`视频代理返回了非视频内容（${contentType}），已取消播放`);
+        return false;
+      }
+
+      consoleLog(LOG_LEVEL_INFO, "Video proxy probe succeeded", {
+        status: response.status,
+        contentType: contentType || "<missing>",
+      });
+      return true;
+    } catch (error) {
+      consoleLog(LOG_LEVEL_ERROR, "Video proxy probe could not reach local proxy", {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+      messageApi.error("WebView 无法访问本地视频代理，已取消播放；请重启应用后重试");
+      return false;
     }
   };
 
@@ -574,9 +627,16 @@ export default function VideoPage() {
       messageApi.error("目前只支持双屏观看");
       return;
     }
-    await checkOrStartProxy();
+    if (!(await checkOrStartProxy())) {
+      return;
+    }
+    if (!(await probeVideoSource(playURL))) {
+      return;
+    }
 
     if (!mainPlayURL) {
+      setPlaybackError("");
+      setPlaybackLoading(true);
       setMainPlayURL(playURL);
       setMutedPlayURL("");
       setPlayURLs([playURL]);
@@ -585,6 +645,8 @@ export default function VideoPage() {
 
     if (!mutedPlayURL) {
       if (play.index === 0) {
+        setPlaybackError("");
+        setPlaybackLoading(true);
         setMutedPlayURL(mainPlayURL);
         setMainPlayURL(playURL);
         setPlayURLs([playURL, mainPlayURL]);
@@ -599,6 +661,64 @@ export default function VideoPage() {
       setMutedPlayURL(playURL);
     }
     setPlayURLs((urls) => [...urls, playURL]);
+  };
+
+  const describeMediaError = (mediaError: MediaError | null) => {
+    switch (mediaError?.code) {
+      case MediaError.MEDIA_ERR_ABORTED:
+        return "视频加载被中止";
+      case MediaError.MEDIA_ERR_NETWORK:
+        return "视频代理或网络请求失败";
+      case MediaError.MEDIA_ERR_DECODE:
+        return "视频解码失败";
+      case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+        return "当前视频地址或媒体格式不受支持";
+      default:
+        return "视频加载失败";
+    }
+  };
+
+  const handleMainVideoError = () => {
+    const player = mainVideoRef.current;
+    const detail = describeMediaError(player?.error ?? null);
+    let sourceMetadata: Record<string, unknown>;
+    try {
+      const source = new URL(player?.currentSrc || mainPlayURL);
+      sourceMetadata = {
+        present: true,
+        protocol: source.protocol,
+        hostname: source.hostname,
+        port: source.port,
+        isMp4Path: source.pathname.toLowerCase().endsWith(".mp4"),
+        hasQuery: source.search.length > 0,
+      };
+    } catch {
+      sourceMetadata = { present: Boolean(player?.currentSrc || mainPlayURL), valid: false };
+    }
+    setPlaybackLoading(false);
+    setPlaybackError(detail);
+    consoleLog(LOG_LEVEL_ERROR, "Video player error", detail, sourceMetadata);
+  };
+
+  const tryStartMainVideo = async () => {
+    const player = mainVideoRef.current;
+    if (!player) return;
+    setPlaybackLoading(false);
+    try {
+      await player.play();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      // Chromium may still require a direct click on the native control when
+      // autoplay with sound is blocked. The media itself remains loaded.
+      consoleLog(LOG_LEVEL_ERROR, "Video autoplay was blocked", error);
+      setPlaybackError(
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "视频已加载，请点击播放器中央的播放按钮开始播放。"
+          : "视频已加载，但自动播放失败，请使用播放器控件重试。"
+      );
+    }
   };
 
   const handleSwapVideo = () => {
@@ -1122,9 +1242,27 @@ export default function VideoPage() {
                         <video
                           ref={mainVideoRef}
                           controls
-                          autoPlay={false}
+                          autoPlay
                           src={mainPlayURL}
                           muted={false}
+                          onLoadStart={() => {
+                            setPlaybackLoading(true);
+                            setPlaybackError("");
+                          }}
+                          onCanPlay={() => void tryStartMainVideo()}
+                          onPlaying={() => {
+                            setPlaybackLoading(false);
+                            setPlaybackError("");
+                          }}
+                          onLoadedMetadata={(event) => {
+                            consoleLog(LOG_LEVEL_INFO, "Video metadata loaded", {
+                              duration: event.currentTarget.duration,
+                              width: event.currentTarget.videoWidth,
+                              height: event.currentTarget.videoHeight,
+                            });
+                          }}
+                          onWaiting={() => setPlaybackLoading(true)}
+                          onError={handleMainVideoError}
                           width="100%"
                           style={{
                             width: "100%",
@@ -1161,6 +1299,37 @@ export default function VideoPage() {
                         </Box>
                       )}
 
+                      {mainPlayURL && playbackLoading ? (
+                        <Box
+                          sx={{
+                            position: "absolute",
+                            inset: 0,
+                            display: "grid",
+                            placeItems: "center",
+                            pointerEvents: "none",
+                            bgcolor: "rgba(0, 0, 0, 0.2)",
+                            zIndex: 2,
+                          }}
+                        >
+                          <CircularProgress size={34} sx={{ color: "common.white" }} />
+                        </Box>
+                      ) : null}
+
+                      {mainPlayURL && playbackError ? (
+                        <Alert
+                          severity="warning"
+                          sx={{
+                            position: "absolute",
+                            left: 16,
+                            right: 16,
+                            bottom: 52,
+                            zIndex: 3,
+                          }}
+                        >
+                          {playbackError}
+                        </Alert>
+                      ) : null}
+
                       {!noSubVideo && mutedPlayURL ? (
                         <Draggable
                           bounds="parent"
@@ -1189,7 +1358,7 @@ export default function VideoPage() {
                             <video
                               ref={subVideoRef}
                               controls
-                              autoPlay={false}
+                              autoPlay
                               src={mutedPlayURL}
                               muted
                               style={{

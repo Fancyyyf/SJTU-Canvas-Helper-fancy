@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import AnnualPage from "../page/annual";
+import AttendancePage from "../page/attendance";
 import CanvasAgentPage from "../page/agent";
 import AssignmentsPage from "../page/assignments";
 import CalendarPage from "../page/calendar";
@@ -19,6 +20,7 @@ import VideoPage from "../page/video";
 // 路由配置对象
 const routesConfig = [
     { path: "/agent", element: <CanvasAgentPage /> },
+    { path: "/attendance", element: <AttendancePage /> },
     { path: "/annual", element: <AnnualPage /> },
     { path: "/assignments", element: <AssignmentsPage /> },
     { path: "/calendar", element: <CalendarPage /> },

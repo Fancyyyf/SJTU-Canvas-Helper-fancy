@@ -67,20 +67,64 @@ async fn proxy_video_request(
     match request.send().await {
         Ok(response) => {
             let status = response.status();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("<missing>")
+                .to_owned();
+            let has_content_range = response.headers().contains_key("content-range");
+            tracing::info!(
+                upstream = upstream_base,
+                %status,
+                %content_type,
+                has_content_range,
+                "Video proxy upstream response"
+            );
             let mut builder = Response::builder().status(status);
             for (key, value) in response.headers() {
+                if matches!(
+                    key.as_str(),
+                    "connection"
+                        | "access-control-allow-origin"
+                        | "keep-alive"
+                        | "proxy-authenticate"
+                        | "proxy-authorization"
+                        | "te"
+                        | "trailer"
+                        | "transfer-encoding"
+                        | "upgrade"
+                ) {
+                    continue;
+                }
                 builder = builder.header(key, value);
             }
+            builder = builder.header("Access-Control-Allow-Origin", "*");
+            builder = builder.header("Access-Control-Allow-Private-Network", "true");
+            builder = builder.header(
+                "Access-Control-Expose-Headers",
+                "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+            );
+            builder = builder.header("Accept-Ranges", "bytes");
             let stream = response
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(std::io::Error::other));
             let body = warp::hyper::Body::wrap_stream(stream);
             Ok(builder.body(body).unwrap())
         }
-        Err(error) => Ok(Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Error downloading video: {error}").into())
-            .unwrap()),
+        Err(error) => {
+            tracing::error!(
+                upstream = upstream_base,
+                error = %error,
+                "Video proxy upstream request failed"
+            );
+            Ok(Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Allow-Private-Network", "true")
+                .body("Video upstream request failed".into())
+                .unwrap())
+        }
     }
 }
 
@@ -201,6 +245,7 @@ impl App {
         if !App::account_exists(account)? {
             return Err(AppError::AccountNotExists);
         }
+        self.stop_attendance_watch(None).await;
         let config_path = App::get_config_path(account);
         let config = App::read_config_from_file(&config_path)?;
         let base_url = Self::get_base_url(&config.account_type);
@@ -264,6 +309,8 @@ impl App {
             config: RwLock::new(config),
             handle: Default::default(),
             mcp_handle: Default::default(),
+            attendance_handle: Default::default(),
+            attendance_status: Default::default(),
             cache: Default::default(),
         }
     }
@@ -283,14 +330,15 @@ impl App {
     }
 
     async fn wait_proxy_ready(&self, proxy_port: u16) -> Result<bool> {
-        let url = format!("http://localhost:{proxy_port}/ready");
+        let url = format!("http://127.0.0.1:{proxy_port}/ready");
         let timeout_cnt = 10;
         let mut cnt = 0;
         loop {
-            let response = reqwest::get(&url).await?;
-            if response.status() == 200 {
-                tracing::info!("Proxy ready check success");
-                break Ok(true);
+            if let Ok(response) = reqwest::get(&url).await {
+                if response.status() == 200 {
+                    tracing::info!("Proxy ready check success");
+                    break Ok(true);
+                }
             }
             cnt += 1;
             if cnt >= timeout_cnt {
@@ -302,8 +350,14 @@ impl App {
     }
 
     pub async fn prepare_proxy(&self) -> Result<bool> {
-        if self.handle.read().await.is_some() {
-            return Ok(true);
+        {
+            let mut handle = self.handle.write().await;
+            if let Some(proxy) = handle.as_ref() {
+                if !proxy.is_finished() {
+                    return Ok(true);
+                }
+                *handle = None;
+            }
         }
         let proxy_port = self.config.read().await.proxy_port;
 
@@ -334,10 +388,34 @@ impl App {
                     headers,
                 )
             });
+        // WebView2 may preflight loopback requests before sending a Range GET.
+        // Without an explicit OPTIONS response the browser reports only a
+        // generic TypeError and never reaches either video route.
+        let proxy_preflight =
+            warp::options()
+                .and(warp::path::full())
+                .map(|path: warp::path::FullPath| {
+                    tracing::info!(path = path.as_str(), "Video proxy CORS preflight");
+                    Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                        .header(
+                            "Access-Control-Allow-Headers",
+                            "Range, Accept, Content-Type",
+                        )
+                        .header("Access-Control-Allow-Private-Network", "true")
+                        .header("Access-Control-Max-Age", "600")
+                        .body(warp::hyper::Body::empty())
+                        .unwrap()
+                });
         // Ready Check Endpoint: /ready
         let ready_check = warp::path!("ready").map(|| Response::builder().body(""));
 
-        let routes = legacy_video_proxy.or(canvas_video_proxy).or(ready_check);
+        let routes = proxy_preflight
+            .or(legacy_video_proxy)
+            .or(canvas_video_proxy)
+            .or(ready_check);
         let handle = tokio::spawn(warp::serve(routes).run(([127, 0, 0, 1], proxy_port)));
         *self.handle.write().await = Some(handle);
 
@@ -402,7 +480,34 @@ impl App {
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
         let content = fs::read_to_string(config_path)?;
-        Ok(content)
+        let mut value: serde_json::Value = serde_json::from_str(&content)?;
+        fn redact(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(entries) => {
+                    for (key, child) in entries {
+                        if matches!(
+                            key.as_str(),
+                            "token"
+                                | "key"
+                                | "llm_api_key"
+                                | "ja_auth_cookie"
+                                | "attendance_password"
+                                | "video_cookies"
+                                | "oauth_consumer_key"
+                                | "access_token"
+                        ) {
+                            *child = serde_json::Value::String("<redacted>".to_owned());
+                        } else {
+                            redact(child);
+                        }
+                    }
+                }
+                serde_json::Value::Array(values) => values.iter_mut().for_each(redact),
+                _ => {}
+            }
+        }
+        redact(&mut value);
+        Ok(serde_json::to_string_pretty(&value)?)
     }
 
     pub async fn list_courses(&self) -> Result<Vec<Course>> {

@@ -8,6 +8,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useRef } from "react";
 
 import type {
+  AttendanceEventPayload,
   FileChatStreamChunkPayload,
   FileChatStreamDonePayload,
   FileChatStreamErrorPayload,
@@ -19,6 +20,7 @@ import type {
  * Rust 端通过 app.emit 派发，任何窗口/Webview 都能收到。
  */
 export interface TauriEventMap {
+  "attendance://event": AttendanceEventPayload;
   "file_ai_chat://chunk": FileChatStreamChunkPayload;
   "file_ai_chat://done": FileChatStreamDonePayload;
   "file_ai_chat://error": FileChatStreamErrorPayload;

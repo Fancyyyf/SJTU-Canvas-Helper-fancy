@@ -15,6 +15,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../python/attendance/nn.py": "python/attendance/nn.py",
+      "../python/attendance/surveil.py": "python/attendance/surveil.py",
+      "../python/attendance/requirements.txt": "python/attendance/requirements.txt",
+      "../python/attendance/README.md": "python/attendance/README.md"
+    },
     "createUpdaterArtifacts": "v1Compatible"
   },
   "productName": "SJTU Canvas Helper",
@@ -33,7 +39,7 @@
   },
   "app": {
     "security": {
-      "csp": "default-src 'self' http: https: data: blob: 'unsafe-eval' 'unsafe-inline'; connect-src 'self' http: https: ws: wss: wss://jaccount.sjtu.edu.cn"
+      "csp": "default-src 'self' http: https: data: blob: 'unsafe-eval' 'unsafe-inline'; connect-src 'self' http: https: ws: wss: wss://jaccount.sjtu.edu.cn; media-src 'self' http://localhost:* http://127.0.0.1:* https: blob: data:"
     },
     "windows": [
       {

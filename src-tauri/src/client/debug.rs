@@ -168,6 +168,13 @@ fn headers_to_debug(headers: &HeaderMap) -> Vec<DebugHttpHeader> {
         .collect()
 }
 
-fn sanitize_header_value(_name: &str, value: &str) -> String {
-    value.to_owned()
+fn sanitize_header_value(name: &str, value: &str) -> String {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+    ) {
+        "<redacted>".to_owned()
+    } else {
+        value.to_owned()
+    }
 }

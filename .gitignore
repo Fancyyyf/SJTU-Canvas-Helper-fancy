@@ -23,3 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 opencode.json
+
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.venv*/
+
+# Obsolete local Rust captcha model; Python attendance uses ddddocr instead.
+src-tauri/assets/captcha.rten

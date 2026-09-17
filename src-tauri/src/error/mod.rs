@@ -54,6 +54,8 @@ pub enum AppError {
     DocxReaderError(#[from] docx_rs::ReaderError),
     #[error("LLM error: {0}")]
     LLMError(String),
+    #[error("Attendance error: {0}")]
+    AttendanceError(String),
 }
 
 impl serde::Serialize for AppError {

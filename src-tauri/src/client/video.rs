@@ -365,7 +365,19 @@ impl Client {
     }
 
     pub async fn get_uuid(&self) -> Result<Option<String>> {
-        let resp = self.cli.get(MY_SJTU_URL).send().await?.error_for_status()?;
+        // QR login must start without cookies from an earlier authenticated
+        // session. Reusing `self.cli` can make my.sjtu return the signed-in
+        // application page, which contains no QR UUID and looks like a QR
+        // service failure to the frontend.
+        let qr_client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
+            .cookie_store(true)
+            .build()?;
+        let resp = qr_client
+            .get(MY_SJTU_URL)
+            .send()
+            .await?
+            .error_for_status()?;
         let body = resp.text().await?;
         // let document = Document::from(body.as_str());
         let re = Regex::new(

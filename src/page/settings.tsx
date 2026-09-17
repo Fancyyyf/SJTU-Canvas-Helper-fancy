@@ -143,7 +143,7 @@ const fullWidthChipSx = {
 function InlineQRCodePanel({
   onScanSuccess,
 }: {
-  onScanSuccess: () => void;
+  onScanSuccess: (jaAuthCookie: string) => void;
 }) {
   const theme = useTheme();
   const { qrcode, showQRCode, refreshQRCode, loading, error } = useQRCode({
@@ -209,7 +209,11 @@ function InlineQRCodePanel({
               <Typography variant="body2" color="text.secondary">
                 {error || "正在获取登录二维码…"}
               </Typography>
-              <Button variant="outlined" onClick={() => void showQRCode()}>
+              <Button
+                variant="outlined"
+                onClick={() => void showQRCode()}
+                disabled={loading}
+              >
                 重新获取二维码
               </Button>
             </Stack>
@@ -392,7 +396,10 @@ export default function SettingsPage() {
         return ok;
       } catch (error) {
         consoleLog(LOG_LEVEL_INFO, "check_extra_login_status", error);
-        setExtraLoginReady(false);
+        // A connectivity failure does not prove that the saved login has
+        // expired. Keep the state indeterminate so we do not immediately
+        // replace the status panel with a QR login flow.
+        setExtraLoginReady(null);
         if (!silent) {
           messageApi.warning(`额外登录态检查失败：${error}`);
         }
@@ -431,8 +438,6 @@ export default function SettingsPage() {
       initialSnapshotRef.current = JSON.stringify(normalizedConfig);
       setTokenError("");
       setSavePathError("");
-      consoleLog(LOG_LEVEL_INFO, "init config: ", normalizedConfig);
-
       if (normalizedConfig.token.length === 0) {
         setOpenTour(true);
         setTourStep(0);
@@ -1021,9 +1026,26 @@ export default function SettingsPage() {
                         </Button>
                       </Stack>
 
-                      {extraLoginReady === false ? (
+                      {extraLoginReady === false && !checkingExtraLogin ? (
                         <InlineQRCodePanel
-                          onScanSuccess={() => {
+                          onScanSuccess={(jaAuthCookie) => {
+                            // The QR hook persists the cookie independently of
+                            // this form. Mirror it into both snapshots so a
+                            // later settings save cannot restore the stale,
+                            // empty value that existed before scanning.
+                            setFormData((previous) =>
+                              previous
+                                ? { ...previous, ja_auth_cookie: jaAuthCookie }
+                                : previous
+                            );
+                            setInitialSnapshot((previous) => {
+                              if (!previous) return previous;
+                              const snapshot = JSON.parse(previous) as AppConfig;
+                              return JSON.stringify({
+                                ...snapshot,
+                                ja_auth_cookie: jaAuthCookie,
+                              });
+                            });
                             messageApi.success("扫码登录成功，已保存额外登录态。", 0.8);
                             checkExtraLoginStatus(true);
                           }}
@@ -1043,9 +1065,11 @@ export default function SettingsPage() {
                               direction={{ xs: "column", sm: "row" }}
                               alignItems={{ xs: "flex-start", sm: "center" }}
                             >
-                              <CircularProgress size={22} />
+                              {checkingExtraLogin ? <CircularProgress size={22} /> : null}
                               <Typography variant="body2" color="text.secondary">
-                                正在检查额外登录状态，确认未登录后会显示二维码。
+                                {checkingExtraLogin
+                                  ? "正在检查额外登录状态，确认未登录后会显示二维码。"
+                                  : "登录状态检测失败，请检查网络后点击上方按钮重新检测。"}
                               </Typography>
                             </Stack>
                           </CardContent>

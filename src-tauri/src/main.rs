@@ -6,11 +6,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use error::{AppError, Result};
 use model::{
-    Account, AccountInfo, AnnualReport, AppConfig, Assignment, CalendarEvent, CanvasVideo, Colors,
-    Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
-    FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel, ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, User,
-    UserSubmissions,
+    Account, AccountInfo, AnnualReport, AppConfig, Assignment, AttendancePythonStatus,
+    AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, Colors, Course, DiscussionTopic, File,
+    FileChatStreamChunkPayload, FileChatStreamDonePayload, FileChatStreamErrorPayload, Folder,
+    FullDiscussion, LLMChatMessage, LogLevel, ModuleItem, NetworkRequestLog, QRCodeScanResult,
+    RelationshipTopo, Subject, Submission, User, UserSubmissions,
     VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
 };
 
@@ -317,6 +317,39 @@ async fn list_course_assignments(course_id: i64) -> Result<Vec<Assignment>> {
 #[tauri::command]
 async fn filter_course_qrcode_images(course_id: i64) -> Result<Vec<QRCodeScanResult>> {
     APP.filter_course_qrcode_images(course_id).await
+}
+
+#[tauri::command]
+async fn start_attendance_watch(window: Window, interval_ms: u64) -> Result<bool> {
+    APP.start_attendance_watch(window, interval_ms).await
+}
+
+#[tauri::command]
+async fn stop_attendance_watch(window: Window) {
+    APP.stop_attendance_watch(Some(&window)).await;
+}
+
+#[tauri::command]
+async fn get_attendance_watch_status() -> AttendanceWatchStatus {
+    APP.get_attendance_watch_status().await
+}
+
+#[tauri::command]
+async fn check_attendance_python(
+    window: Window,
+    python_command: Option<String>,
+) -> AttendancePythonStatus {
+    APP.check_attendance_python(&window, python_command.as_deref()).await
+}
+
+#[tauri::command]
+async fn scan_attendance_once(window: Window) -> Result<Vec<String>> {
+    APP.scan_attendance_once(&window).await
+}
+
+#[tauri::command]
+async fn sign_attendance_url(window: Window, url: String) -> Result<AttendanceSignResult> {
+    APP.sign_attendance_url(&window, &url).await
 }
 
 #[tauri::command]
@@ -657,7 +690,7 @@ async fn get_colors() -> Result<Colors> {
 
 #[tauri::command]
 async fn save_config(config: AppConfig) -> Result<()> {
-    tracing::info!("Receive config: {:?}", config);
+    tracing::info!("Receive config update");
     APP.save_config(config).await
 }
 
@@ -1007,6 +1040,12 @@ async fn main() -> Result<()> {
             list_course_assignments,
             list_course_assignment_submissions,
             filter_course_qrcode_images,
+            start_attendance_watch,
+            stop_attendance_watch,
+            get_attendance_watch_status,
+            check_attendance_python,
+            scan_attendance_once,
+            sign_attendance_url,
             get_single_course_assignment_submission,
             export_excel,
             list_folder_files,
@@ -1098,6 +1137,7 @@ async fn main() -> Result<()> {
                     rt.block_on(async {
                         APP.stop_mcp().await;
                         APP.stop_proxy().await;
+                        APP.stop_attendance_watch(None).await;
                     });
                 });
                 let _ = handle.join();

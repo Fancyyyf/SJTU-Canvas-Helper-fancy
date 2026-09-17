@@ -170,6 +170,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub ja_auth_cookie: String,
     #[serde(default)]
+    pub attendance_password_login_enabled: bool,
+    #[serde(default)]
+    pub attendance_username: String,
+    #[serde(default)]
+    pub attendance_password: String,
+    #[serde(default = "default_attendance_risk_delay_ms")]
+    pub attendance_risk_delay_ms: u64,
+    #[serde(default = "default_attendance_python_command")]
+    pub attendance_python_command: String,
+    #[serde(default)]
     pub video_cookies: String,
     #[serde(default)]
     pub oauth_consumer_key: String,
@@ -207,6 +217,11 @@ impl Default for AppConfig {
             account_type: Default::default(),
             serve_as_plaintext: Default::default(),
             ja_auth_cookie: Default::default(),
+            attendance_password_login_enabled: false,
+            attendance_username: Default::default(),
+            attendance_password: Default::default(),
+            attendance_risk_delay_ms: default_attendance_risk_delay_ms(),
+            attendance_python_command: default_attendance_python_command(),
             video_cookies: Default::default(),
             oauth_consumer_key: Default::default(),
             proxy_port: 3030,
@@ -231,6 +246,14 @@ impl Default for AppConfig {
 
 fn default_proxy_port() -> u16 {
     3030
+}
+
+fn default_attendance_risk_delay_ms() -> u64 {
+    1_000
+}
+
+fn default_attendance_python_command() -> String {
+    "python".to_owned()
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -805,6 +828,52 @@ pub struct SubmissionUploadErrorResponse {
 pub struct QRCodeScanResult {
     pub file: File,
     pub contents: Vec<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendanceWatchStatus {
+    pub running: bool,
+    pub interval_ms: u64,
+    pub started_at: Option<String>,
+    pub last_scan_at: Option<String>,
+    pub last_detected_at: Option<String>,
+    pub scan_count: u64,
+    pub detected_count: u64,
+    pub duplicate_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub last_qr_content: Option<String>,
+    pub last_message: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendanceEventPayload {
+    pub kind: String,
+    pub timestamp: String,
+    pub message: String,
+    pub qr_content: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendanceSignResult {
+    pub success: bool,
+    pub message: String,
+    pub qr_url: String,
+    pub response_status: u16,
+    pub response_body: String,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendancePythonStatus {
+    pub available: bool,
+    pub interpreter: String,
+    pub version: String,
+    pub module_dir: String,
+    pub message: String,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -34,7 +34,6 @@ import {
   File,
   Folder,
   LOG_LEVEL_ERROR,
-  LOG_LEVEL_INFO,
   LoginMessage,
   ModuleItem,
   RelationshipTopo,
@@ -451,7 +450,11 @@ function MergeProgress({
   );
 }
 
-export function useQRCode({ onScanSuccess }: { onScanSuccess?: () => void }) {
+export function useQRCode({
+  onScanSuccess,
+}: {
+  onScanSuccess?: (jaAuthCookie: string) => void;
+}) {
   const [uuid, setUuid] = useState<string>("");
   const [qrcode, setQrcode] = useState<string>("");
   const [wsURL, setWsURL] = useState<string>("");
@@ -469,17 +472,25 @@ export function useQRCode({ onScanSuccess }: { onScanSuccess?: () => void }) {
     setLoading(true);
     setError("");
     setQrcode("");
+    setWsURL("");
+    setUuid("");
+    uuidRef.current = "";
     hasRetriedRef.current = false;
-    const nextUuid = (await invoke("get_uuid")) as string | null;
-    consoleLog(LOG_LEVEL_ERROR, nextUuid)
-    if (nextUuid) {
-      uuidRef.current = nextUuid;
-      setUuid(nextUuid);
-      setWsURL(`${WEBSOCKET_BASE_URL}/${nextUuid}`);
-      return;
+    try {
+      const nextUuid = (await invoke("get_uuid")) as string | null;
+      if (nextUuid) {
+        uuidRef.current = nextUuid;
+        setUuid(nextUuid);
+        setWsURL(`${WEBSOCKET_BASE_URL}/${nextUuid}`);
+        return;
+      }
+      setLoading(false);
+      setError("登录页面未返回二维码标识，请稍后重试。");
+    } catch (e) {
+      setLoading(false);
+      consoleLog(LOG_LEVEL_ERROR, "获取登录二维码标识失败", e);
+      setError(`获取登录二维码失败：${e}`);
     }
-    setLoading(false);
-    setError("未能获取登录二维码标识，请稍后重试。");
   }, []);
 
   const handleScanSuccess = async () => {
@@ -490,11 +501,10 @@ export function useQRCode({ onScanSuccess }: { onScanSuccess?: () => void }) {
       if (!JAAuthCookie) {
         return;
       }
-      consoleLog(LOG_LEVEL_INFO, "读取到 JAAuthCookie: ", JAAuthCookie);
-      const config = await getConfig();
+      const config = await getConfig(true);
       config.ja_auth_cookie = JAAuthCookie;
       await saveConfig(config);
-      onScanSuccess?.();
+      onScanSuccess?.(JAAuthCookie);
     } catch (e) {
       appMessage().error(`登录失败🥹：${e}`);
     }
