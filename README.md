@@ -105,7 +105,11 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 作业列表额外提供“全部课程（当前学期范围）”选项。选择后会并行聚合当前全局学期内的所有课程作业，并在每条作业上显示课程标签；某一门课程请求失败时，其余课程仍会显示并给出降级提示。“只显示未完成”会按每门课程的学生/教师身份分别处理，提交、评论和修改日期等操作始终使用作业自身的 `course_id`，不会误用之前选中的课程。
 
+日程页使用全局学期范围内的全部课程，不会再因为课程缺少自定义颜色而跳过。页面会将 Canvas 日历事件与每门课程作业接口中的 `due_at` 合并并按课程和作业编号去重；日历接口失败时，会自动回退到作业接口的截止日期，单门课程加载失败也不会阻断其他课程，并会在页面显示降级提示。
+
 ### 文件下载/预览
+
+文件列表默认按 Canvas 返回的最后修改时间从新到旧排列，也可以切换为修改时间正序、名称正序/倒序或文件大小正序/倒序。文件夹始终排列在文件之前；没有修改时间的外部文件会排在有时间信息的文件之后。列表中的“最后修改”列依次回退使用 `modified_at`、`updated_at` 和 `created_at`。
 
 采用类似 macOS Quick Look 的预览体验：
 - 按下空格打开预览
@@ -632,38 +636,111 @@ Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[�
 
 #### Windows x64 Release 快速操作
 
-在项目根目录打开 PowerShell，首次构建先准备依赖：
+下面的流程只在当前 Windows 电脑生成本地 Release，不创建 GitHub Release、不切换 `release` 分支，也不向上游仓库上传文件。为了避免安装后的本地版本连接本项目预设的上游更新地址，构建命令还会通过临时配置关闭 Updater；该配置只对当前命令生效，不会修改 `src-tauri/tauri.conf.json`。
+
+##### 已经可以运行开发模式时
+
+如果当前项目已经能运行 `yarn tauri dev` 或 `yarn dev`，说明 `node_modules/` 中已经存在这次开发所需的前端依赖。只要以下内容没有变化，就不需要在每次 Release 构建前重新执行 `yarn install`：
+
+- `package.json` 没有新增、删除或升级依赖；
+- `yarn.lock` 没有变化；
+- `node_modules/` 没有被删除或损坏；
+- 没有切换到依赖定义不同的分支。
+
+开发模式能运行并不表示依赖已经被编译进源码。`yarn dev` 启动 Vite 时，仍然是从本机 `node_modules/` 读取 React、MUI、Tauri API 等组件；这些依赖通常是在之前某次 `yarn install` 时安装的。Release 构建会继续复用同一份 `node_modules/`，不会自动重复下载。
+
+开发预览和 Release 构建的区别是：`yarn dev` 主要启动开发服务器并按需转换模块，而 `yarn tauri build` 会执行 TypeScript/生产前端构建、Rust release 编译、资源嵌入和安装包生成。因此开发模式可运行是一个很好的依赖完整性信号，但仍应执行发布检查，以发现只在类型检查、优化打包或 Rust release 编译阶段出现的问题。
+
+当前机器已经能够正常开发时，可以直接在项目根目录运行：
+
+```powershell
+cd H:\Daily_project_vault\SJTU-Canvas-Helper-fancy
+
+yarn.cmd lint
+yarn.cmd test
+yarn.cmd typecheck
+cargo check --manifest-path src-tauri\Cargo.toml
+cargo test --manifest-path src-tauri\Cargo.toml
+
+$env:NODE_OPTIONS = "--max_old_space_size=4096"
+
+yarn.cmd tauri build `
+  --config src-tauri/tauri.local.conf.json `
+  --target x86_64-pc-windows-msvc `
+  --bundles msi,nsis
+```
+
+##### 新电脑、首次克隆或依赖已经变化时
+
+只有首次准备环境或依赖发生变化时，才需要先安装依赖：
 
 ```powershell
 corepack enable
-yarn install --frozen-lockfile
+yarn.cmd install --frozen-lockfile
 
 rustup default stable-msvc
 rustup target add x86_64-pc-windows-msvc
 cargo fetch --manifest-path src-tauri/Cargo.toml --locked
 ```
 
-发布前执行基础检查：
+这些命令的含义如下：
+
+| 命令 | 含义 | 是否每次构建都需要 |
+| --- | --- | --- |
+| `corepack enable` | 启用 Node.js 自带的包管理器代理，使系统可以调用 Yarn | 通常每台电脑一次 |
+| `yarn.cmd install --frozen-lockfile` | 严格按照 `yarn.lock` 安装前端依赖，不允许自动改写锁文件 | 首次克隆、锁文件变化或 `node_modules` 损坏时 |
+| `rustup default stable-msvc` | 将 Windows Rust 默认工具链设为稳定版 MSVC | 通常每台电脑一次 |
+| `rustup target add x86_64-pc-windows-msvc` | 安装 Windows x64 Rust 编译目标 | 通常每台电脑一次 |
+| `cargo fetch --locked` | 按 `Cargo.lock` 预先下载 Rust 依赖 | 首次构建或 Rust 依赖变化时，可省略并让构建自动下载 |
+
+`--frozen-lockfile` 的目的主要是让新电脑和 CI 获得可复现的依赖版本，不代表每次本地构建都必须重装依赖。
+
+##### 发布检查的含义
 
 ```powershell
-yarn lint
-yarn test
-yarn typecheck
+yarn.cmd lint
+yarn.cmd test
+yarn.cmd typecheck
 
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml app::attendance::tests
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-构建本地未签名的 MSI 和 NSIS 安装包：
+| 命令 | 检查内容 |
+| --- | --- |
+| `yarn.cmd lint` | 检查前端代码规范和常见错误；警告不会阻止构建，错误会阻止 |
+| `yarn.cmd test` | 运行前端 Vitest 测试 |
+| `yarn.cmd typecheck` | 执行 TypeScript 类型检查，不生成文件 |
+| `cargo check` | 快速检查 Rust 能否编译，不生成最终程序 |
+| `cargo test` | 编译并运行 Rust 离线测试；需要真实 Token 或外网的测试会标记为 ignored |
+
+##### 生成本地安装包
+
+PowerShell 中执行：
 
 ```powershell
 $env:NODE_OPTIONS = "--max_old_space_size=4096"
 
-yarn tauri build `
-  --no-sign `
+yarn.cmd tauri build `
+  --config src-tauri/tauri.local.conf.json `
   --target x86_64-pc-windows-msvc `
   --bundles msi,nsis
 ```
+
+各部分含义：
+
+| 命令或参数 | 含义 |
+| --- | --- |
+| `$env:NODE_OPTIONS = "--max_old_space_size=4096"` | 给前端生产打包最多约 4 GiB Node.js 堆内存，仅影响当前 PowerShell 会话 |
+| `yarn.cmd tauri build` | 运行 Tauri release 构建；自动执行配置中的 `yarn build`，然后编译 Rust 并生成安装包 |
+| `` ` `` | PowerShell 续行符，表示下一行仍属于同一条命令；也可以把命令写在一行中 |
+| `--config src-tauri/tauri.local.conf.json` | 合并仓库内的本地构建配置，关闭 Updater、清空更新地址并禁止生成 Updater 更新产物 |
+| `--target x86_64-pc-windows-msvc` | 生成 64 位 Windows MSVC 程序 |
+| `--bundles msi,nsis` | 同时生成 MSI 和 NSIS `setup.exe`；也可以只写其中一个 |
+
+当前仓库实际锁定的 `tauri-cli 2.7.1` 没有 `--no-sign` 参数，因此不要添加该参数。项目本地配置没有设置 Windows 代码签名证书，生成的安装包自然是未签名安装包，Windows 可能显示 SmartScreen 警告。
+
+构建不会执行 `git push`、创建标签或上传 GitHub。首次缺少 Yarn、Cargo 或 Tauri 的依赖缓存时，构建仍可能连接 npm/crates.io 下载依赖；“不连接上游”在这里指不连接项目的上游 GitHub 发布渠道。通过 `tauri.local.conf.json` 构建出的应用也不会使用上游 Updater 地址。
 
 安装包输出到：
 
@@ -675,12 +752,18 @@ src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\
 只需要 release 可执行文件、不需要安装包时：
 
 ```powershell
-yarn tauri build --no-sign --no-bundle --target x86_64-pc-windows-msvc
+yarn.cmd tauri build --config src-tauri/tauri.local.conf.json --no-bundle --target x86_64-pc-windows-msvc
+```
+
+`--no-bundle` 表示只生成 release 可执行文件，不生成 MSI 或 NSIS 安装包。可执行文件通常位于：
+
+```text
+src-tauri\target\x86_64-pc-windows-msvc\release\SJTU Canvas Helper.exe
 ```
 
 不要通过覆盖 `beforeBuildCommand` 为 `npx vite build` 来绕过 TypeScript 检查。正式 Release 必须先让 `yarn typecheck` 和 `yarn build` 通过；依赖升级产生类型回归时，应修复公开类型引用或锁定依赖版本。
 
-正式生成 Updater 更新包时，先配置第 13 节的密钥，再移除 `--no-sign`：
+正式生成 Updater 更新包时，不使用 `tauri.local.conf.json`，并先配置第 13 节的密钥：
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = "C:\安全目录\sjtu-canvas-helper.key"
@@ -699,10 +782,10 @@ Updater 签名不等同于 Windows Authenticode 签名。面向公众分发时�
 #### 通用构建流程
 
 ```shell
-yarn tauri build --no-sign
+yarn tauri build --config src-tauri/tauri.local.conf.json
 ```
 
-正式发布时先配置第 13 节的 Updater 私钥和各操作系统签名，再去掉 `--no-sign` 运行 `yarn tauri build`。
+正式发布时先配置第 13 节的 Updater 私钥和各操作系统签名，然后使用默认配置运行 `yarn tauri build`，不要加载本地配置覆盖文件。
 
 构建过程依次完成：
 
@@ -715,14 +798,14 @@ yarn tauri build --no-sign
 不生成安装包、只验证 release 可执行文件：
 
 ```shell
-yarn tauri build --no-bundle --no-sign
+yarn tauri build --config src-tauri/tauri.local.conf.json --no-bundle
 ```
 
 构建与打包分开执行：
 
 ```shell
-yarn tauri build --no-bundle --no-sign
-yarn tauri bundle --no-sign
+yarn tauri build --config src-tauri/tauri.local.conf.json --no-bundle
+yarn tauri bundle --config src-tauri/tauri.local.conf.json
 ```
 
 默认输出在 `src-tauri/target/release/`。显式使用 `--target <triple>` 时，输出位于 `src-tauri/target/<triple>/release/`；平台安装包位于其 `bundle/` 子目录。
@@ -733,18 +816,18 @@ yarn tauri bundle --no-sign
 
 Windows 建议在 Windows 主机或 `windows-latest` Runner 上原生构建。Tauri 支持 WiX `.msi` 和 NSIS `-setup.exe`，详见[官方 Windows Installer 文档](https://v2.tauri.app/distribute/windows-installer/)。
 
-以下示例用于本地未签名验证；正式发布时去掉 `--no-sign` 并提供签名配置。64 位：
+以下示例使用本地配置生成未签名安装包；正式发布时不要加载本地配置文件，并应提供签名配置。64 位：
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
-yarn tauri build --no-sign --target x86_64-pc-windows-msvc --bundles msi,nsis
+yarn tauri build --config src-tauri/tauri.local.conf.json --target x86_64-pc-windows-msvc --bundles msi,nsis
 ```
 
 32 位：
 
 ```powershell
 rustup target add i686-pc-windows-msvc
-yarn tauri build --no-sign --target i686-pc-windows-msvc --bundles msi,nsis
+yarn tauri build --config src-tauri/tauri.local.conf.json --target i686-pc-windows-msvc --bundles msi,nsis
 ```
 
 典型输出：
@@ -765,11 +848,11 @@ macOS 安装包应在 macOS 主机生成。分别构建 Apple Silicon 和 Intel�
 ```bash
 # Apple Silicon
 rustup target add aarch64-apple-darwin
-yarn tauri build --no-sign --target aarch64-apple-darwin --bundles app,dmg
+yarn tauri build --config src-tauri/tauri.local.conf.json --target aarch64-apple-darwin --bundles app,dmg
 
 # Intel
 rustup target add x86_64-apple-darwin
-yarn tauri build --no-sign --target x86_64-apple-darwin --bundles app,dmg
+yarn tauri build --config src-tauri/tauri.local.conf.json --target x86_64-apple-darwin --bundles app,dmg
 ```
 
 典型输出：
@@ -788,7 +871,7 @@ macOS GUI 应用通常不会继承 shell 启动文件中的完整 `PATH`。因�
 Linux 通常在目标发行版或兼容的容器/Runner 上构建：
 
 ```bash
-yarn tauri build --no-sign --bundles deb,rpm,appimage
+yarn tauri build --config src-tauri/tauri.local.conf.json --bundles deb,rpm,appimage
 ```
 
 典型输出：

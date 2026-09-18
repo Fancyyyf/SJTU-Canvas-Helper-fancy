@@ -31,8 +31,9 @@ import { Link as RouterLink } from "react-router-dom";
 import BasicLayout from "../components/layout";
 import { WorkspaceHero } from "../components/workspace_hero";
 import { useCourses } from "../lib/hooks";
+import { logHandledError } from "../lib/logger";
 import { useAppMessage } from "../lib/message";
-import { CalendarEvent, Colors, Course } from "../lib/model";
+import { Assignment, CalendarEvent, Colors, Course } from "../lib/model";
 
 const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const monthOptions = [
@@ -58,7 +59,51 @@ function getCourseId(event: CalendarEvent) {
 }
 
 function getEventMoment(event: CalendarEvent) {
-  return dayjs(event.end_at || event.start_at || dayjs().toISOString());
+  return dayjs(event.end_at || event.start_at || event.assignment.due_at);
+}
+
+function assignmentToCalendarEvent(assignment: Assignment, course: Course): CalendarEvent {
+  const dueAt = assignment.due_at;
+  return {
+    title: assignment.name,
+    workflow_state: assignment.published ? "published" : "unpublished",
+    id: `assignment_${course.id}_${assignment.id}`,
+    type_field: "assignment",
+    assignment,
+    html_url: assignment.html_url,
+    end_at: dueAt,
+    start_at: dueAt,
+    context_code: `course_${course.id}`,
+    context_name: course.name,
+    url: assignment.html_url,
+    important_dates: true,
+  };
+}
+
+function eventIdentity(event: CalendarEvent) {
+  return event.assignment.id > 0
+    ? `${event.context_code}:assignment_${event.assignment.id}`
+    : `${event.context_code}:event_${event.id}`;
+}
+
+function dedupeEvents(rawEvents: CalendarEvent[]) {
+  const seen = new Set<string>();
+  return rawEvents.filter((event) => {
+    if (!getEventMoment(event).isValid()) return false;
+    const identity = eventIdentity(event);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function eventsWithinRange(events: CalendarEvent[], startDate: string, endDate: string) {
+  const start = dayjs(startDate).valueOf();
+  const end = dayjs(endDate).valueOf();
+  return events.filter((event) => {
+    const timestamp = getEventMoment(event).valueOf();
+    return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
+  });
 }
 
 function getDateKey(date: Dayjs) {
@@ -82,8 +127,11 @@ export default function CalendarPage() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [hintEvents, setHintEvents] = useState<CalendarEvent[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [calendarFallbackActive, setCalendarFallbackActive] = useState(false);
+  const [assignmentLoadWarning, setAssignmentLoadWarning] = useState("");
   const currentMonthRef = useRef<Dayjs>(dayjs());
   const contextCodesRef = useRef<string[]>([]);
+  const assignmentDueEventsRef = useRef<CalendarEvent[]>([]);
   const courseScopeKey = courses.data.map((course) => course.id).join(",");
 
   useEffect(() => {
@@ -133,77 +181,182 @@ export default function CalendarPage() {
     })) as CalendarEvent[];
   };
 
-  const dedupeEvents = (rawEvents: CalendarEvent[]) => {
-    const seenAssignments = new Set<number>();
-    return rawEvents.filter((event) => {
-      if (seenAssignments.has(event.assignment.id)) {
-        return false;
+  const loadAssignmentDueEvents = async (scopedCourses: Course[]) => {
+    const results = await Promise.allSettled(
+      scopedCourses.map(async (course) => ({
+        course,
+        assignments: (await invoke("list_course_assignments", {
+          courseId: course.id,
+        })) as Assignment[],
+      }))
+    );
+    const dueEvents: CalendarEvent[] = [];
+    const failedCourses: string[] = [];
+
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        failedCourses.push(scopedCourses[index].name);
+        return;
       }
-      seenAssignments.add(event.assignment.id);
-      return true;
+      result.value.assignments.forEach((assignment) => {
+        if (assignment.due_at && dayjs(assignment.due_at).isValid()) {
+          dueEvents.push(assignmentToCalendarEvent(assignment, result.value.course));
+        }
+      });
     });
+
+    if (failedCourses.length > 0) {
+      setAssignmentLoadWarning(
+        `${failedCourses.length} 门课程的作业接口加载失败；已继续显示其余课程及 Canvas 日历返回的事项。`
+      );
+      logHandledError({
+        code: "CALENDAR.ASSIGNMENT_FALLBACK_PARTIAL",
+        scope: "calendar",
+        action: "load_course_assignments",
+        error: new Error(`Failed courses: ${failedCourses.join(", ")}`),
+        userMessage: "部分课程的作业截止日期加载失败。",
+        recoverable: true,
+        fallback: {
+          used: true,
+          strategy: "keep_successful_courses_and_calendar_events",
+          result: "success",
+        },
+      });
+    } else {
+      setAssignmentLoadWarning("");
+    }
+    return dueEvents;
   };
 
-  const init = async (scopedCourses: Course[]) => {
-    try {
-      const nextColors = (await getColors()) as Colors;
-      const courseIds = Array.from(scopedCourses, (course) => `course_${course.id}`);
-      const nextContextCodes = courseIds.filter((courseId) =>
-        Object.keys(nextColors.custom_colors).includes(courseId)
-      );
+  const loadCalendarRange = async (
+    nextContextCodes: string[],
+    startDate: string,
+    endDate: string,
+    assignmentDueEvents: CalendarEvent[]
+  ) => {
+    const assignmentEventsInRange = eventsWithinRange(
+      assignmentDueEvents,
+      startDate,
+      endDate
+    );
+    if (nextContextCodes.length === 0) return assignmentEventsInRange;
 
-      setColors(nextColors);
-      setContextCodes(nextContextCodes);
-      await Promise.all([
-        handleInitCalendarEvents(nextContextCodes, currentMonth),
-        getHints(nextContextCodes),
-      ]);
+    try {
+      const calendarEvents = await handleGetCalendarEvents(
+        nextContextCodes,
+        startDate,
+        endDate
+      );
+      return dedupeEvents([...calendarEvents, ...assignmentEventsInRange]);
     } catch (error) {
-      messageApi.error(`初始化日历失败：${error}`);
+      setCalendarFallbackActive(true);
+      logHandledError({
+        code: "CALENDAR.EVENT_API_FAILED",
+        scope: "calendar",
+        action: "list_calendar_events",
+        error,
+        userMessage: "Canvas 日历接口不可用，已改用课程作业截止日期。",
+        recoverable: true,
+        fallback: {
+          used: true,
+          strategy: "course_assignment_due_dates",
+          result: "success",
+        },
+        context: { startDate, endDate, courseCount: nextContextCodes.length },
+      });
+      return dedupeEvents(assignmentEventsInRange);
     }
   };
 
   const handleInitCalendarEvents = async (
     nextContextCodes: string[],
-    date: Dayjs
+    date: Dayjs,
+    assignmentDueEvents = assignmentDueEventsRef.current
   ) => {
     setLoading(true);
     try {
-      const startDate = date.startOf("month").toISOString();
-      const endDate = date.endOf("month").toISOString();
-      const rawEvents = await handleGetCalendarEvents(
+      const gridDates = getMonthGridDates(date);
+      const startDate = gridDates[0].startOf("day").toISOString();
+      const endDate = gridDates[gridDates.length - 1].endOf("day").toISOString();
+      const rawEvents = await loadCalendarRange(
         nextContextCodes,
         startDate,
-        endDate
+        endDate,
+        assignmentDueEvents
       );
       setEvents(dedupeEvents(rawEvents));
     } catch (error) {
-      messageApi.error(error as string);
+      messageApi.error(`日历加载失败：${error}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const getHints = async (nextContextCodes: string[]) => {
+  const getHints = async (
+    nextContextCodes: string[],
+    assignmentDueEvents = assignmentDueEventsRef.current
+  ) => {
     try {
       const now = dayjs().toISOString();
       const afterAWeek = dayjs().add(7, "day").toISOString();
-      const rawEvents = await handleGetCalendarEvents(nextContextCodes, now, afterAWeek);
+      const rawEvents = await loadCalendarRange(
+        nextContextCodes,
+        now,
+        afterAWeek,
+        assignmentDueEvents
+      );
       const deduped = dedupeEvents(rawEvents).sort(
         (a, b) => getEventMoment(a).valueOf() - getEventMoment(b).valueOf()
       );
       setHintEvents(deduped);
     } catch (error) {
-      messageApi.error(error as string);
+      messageApi.error(`七日提醒加载失败：${error}`);
     }
+  };
+
+  const init = async (scopedCourses: Course[]) => {
+    const nextContextCodes = scopedCourses.map((course) => `course_${course.id}`);
+    setCalendarFallbackActive(false);
+    if (scopedCourses.length === 0) {
+      assignmentDueEventsRef.current = [];
+      setContextCodes([]);
+      setEvents([]);
+      setHintEvents([]);
+      return;
+    }
+
+    const [colorResult, assignmentDueEvents] = await Promise.all([
+      getColors()
+        .then((value) => value as Colors)
+        .catch((error) => {
+          logHandledError({
+            code: "CALENDAR.COLORS_FAILED",
+            scope: "calendar",
+            action: "get_colors",
+            error,
+            userMessage: "课程颜色加载失败，已使用默认颜色。",
+            recoverable: true,
+            fallback: { used: true, strategy: "default_course_color", result: "success" },
+          });
+          return { custom_colors: {} } as Colors;
+        }),
+      loadAssignmentDueEvents(scopedCourses),
+    ]);
+
+    assignmentDueEventsRef.current = assignmentDueEvents;
+    setColors(colorResult);
+    setContextCodes(nextContextCodes);
+    await Promise.all([
+      handleInitCalendarEvents(nextContextCodes, currentMonth, assignmentDueEvents),
+      getHints(nextContextCodes, assignmentDueEvents),
+    ]);
   };
 
   const handleMonthChange = async (date: Dayjs) => {
     setCurrentMonth(date);
     setSelectedDate(date);
-    if (contextCodesRef.current.length > 0) {
-      await handleInitCalendarEvents(contextCodesRef.current, date);
-    }
+    setCalendarFallbackActive(false);
+    await handleInitCalendarEvents(contextCodesRef.current, date);
   };
 
   const monthGridDates = useMemo(() => getMonthGridDates(currentMonth), [currentMonth]);
@@ -359,6 +512,18 @@ export default function CalendarPage() {
                   <Alert severity="info" sx={{ borderRadius: "18px" }}>
                     点击某一天可以查看当天的截止事项，点击事项名称会跳转到对应课程的作业页。
                   </Alert>
+
+                  {calendarFallbackActive ? (
+                    <Alert severity="warning" sx={{ borderRadius: "18px" }}>
+                      Canvas 日历接口暂时不可用，当前已自动改用各课程作业接口中的截止时间。
+                    </Alert>
+                  ) : null}
+
+                  {assignmentLoadWarning ? (
+                    <Alert severity="warning" sx={{ borderRadius: "18px" }}>
+                      {assignmentLoadWarning}
+                    </Alert>
+                  ) : null}
 
                   {loading ? (
                     <Box

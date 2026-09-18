@@ -62,6 +62,12 @@ pub struct File {
     pub size: u64,
     pub locked: bool,
     #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub modified_at: Option<String>,
+    #[serde(default)]
     pub mime_class: String,
     #[serde(default, rename = "content-type")]
     pub content_type: String,

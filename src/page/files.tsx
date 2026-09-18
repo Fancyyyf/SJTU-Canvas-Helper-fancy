@@ -7,6 +7,7 @@ import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
 import KeyboardBackspaceRoundedIcon from "@mui/icons-material/KeyboardBackspaceRounded";
 import PreviewRoundedIcon from "@mui/icons-material/PreviewRounded";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
+import SortRoundedIcon from "@mui/icons-material/SortRounded";
 import UploadFileRoundedIcon from "@mui/icons-material/UploadFileRounded";
 import {
   Alert,
@@ -19,6 +20,7 @@ import {
   FormControlLabel,
   InputAdornment,
   Link as MuiLink,
+  MenuItem,
   Skeleton,
   Stack,
   Tab,
@@ -65,6 +67,7 @@ import {
 } from "../lib/model";
 import {
   consoleLog,
+  formatDate,
   formatSize,
   getFileIcon,
   isMergableFileType,
@@ -85,6 +88,61 @@ const MY_FILES = "my files";
 const EXPLAINABLE_FILE_EXTS = [".pdf", ".docx"];
 const FILE_SUMMARY_OPENING_MESSAGE =
   "请先总结这份文件。若它与作业相关，请额外列出得分点、提交要求、截止时间、文件格式限制和任何容易遗漏的注意事项。";
+
+type FileSortMode =
+  | "modified_desc"
+  | "modified_asc"
+  | "name_asc"
+  | "name_desc"
+  | "size_desc"
+  | "size_asc";
+
+function getFileModifiedAt(file: File) {
+  return file.modified_at || file.updated_at || file.created_at;
+}
+
+function compareEntryNames(left: Entry, right: Entry) {
+  return entryName(left).localeCompare(entryName(right), "zh-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function sortFileEntries(entries: Entry[], mode: FileSortMode) {
+  return [...entries].sort((left, right) => {
+    const leftIsFile = isFile(left);
+    const rightIsFile = isFile(right);
+    if (leftIsFile !== rightIsFile) {
+      return leftIsFile ? 1 : -1;
+    }
+    if (!leftIsFile || !rightIsFile) {
+      return compareEntryNames(left, right);
+    }
+
+    const leftFile = left as File;
+    const rightFile = right as File;
+    if (mode === "name_asc" || mode === "name_desc") {
+      const result = compareEntryNames(left, right);
+      return mode === "name_asc" ? result : -result;
+    }
+    if (mode === "size_asc" || mode === "size_desc") {
+      const result = leftFile.size - rightFile.size;
+      return mode === "size_asc" ? result : -result;
+    }
+
+    const leftValue = getFileModifiedAt(leftFile);
+    const rightValue = getFileModifiedAt(rightFile);
+    const leftTimestamp = leftValue ? Date.parse(leftValue) : Number.NaN;
+    const rightTimestamp = rightValue ? Date.parse(rightValue) : Number.NaN;
+    const leftValid = Number.isFinite(leftTimestamp);
+    const rightValid = Number.isFinite(rightTimestamp);
+    if (leftValid !== rightValid) return leftValid ? -1 : 1;
+    if (!leftValid || !rightValid) return compareEntryNames(left, right);
+    return mode === "modified_asc"
+      ? leftTimestamp - rightTimestamp
+      : rightTimestamp - leftTimestamp;
+  });
+}
 
 function isExplainableFile(file: File) {
   const dotPos = file.display_name.lastIndexOf(".");
@@ -135,6 +193,7 @@ export default function FilesPage() {
     useState<Option<string>>("");
   const [parentFolderId, setParentFolderId] = useState<Option<number>>(null);
   const [keyword, setKeyword] = useState<string>("");
+  const [fileSortMode, setFileSortMode] = useState<FileSortMode>("modified_desc");
   const [openFileOrderSelectModal, setOpenFileOrderSelectModal] =
     useState<boolean>(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -651,11 +710,15 @@ export default function FilesPage() {
   };
 
   const filteredEntries = useMemo(
-    () =>
-      ([...(folders as Entry[]), ...(files as Entry[]), ...externalFiles.data] as Entry[]).filter(
-        shouldShow
-      ),
-    [folders, files, externalFiles.data, keyword, downloadableOnly]
+    () => {
+      const visibleEntries = ([
+        ...(folders as Entry[]),
+        ...(files as Entry[]),
+        ...externalFiles.data,
+      ] as Entry[]).filter(shouldShow);
+      return sortFileEntries(visibleEntries, fileSortMode);
+    },
+    [folders, files, externalFiles.data, keyword, downloadableOnly, fileSortMode]
   );
 
   const selectedFileCount = selectedEntries.filter(isFile).length;
@@ -792,6 +855,28 @@ export default function FilesPage() {
                     />
                   </Stack>
                   <TextField
+                    select
+                    size="small"
+                    label="排序方式"
+                    value={fileSortMode}
+                    onChange={(event) => setFileSortMode(event.target.value as FileSortMode)}
+                    sx={{ minWidth: 190, flexShrink: 0 }}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SortRoundedIcon color="action" />
+                        </InputAdornment>
+                      ),
+                    }}
+                  >
+                    <MenuItem value="modified_desc">最后修改：最新优先</MenuItem>
+                    <MenuItem value="modified_asc">最后修改：最早优先</MenuItem>
+                    <MenuItem value="name_asc">名称：A 到 Z</MenuItem>
+                    <MenuItem value="name_desc">名称：Z 到 A</MenuItem>
+                    <MenuItem value="size_desc">大小：从大到小</MenuItem>
+                    <MenuItem value="size_asc">大小：从小到大</MenuItem>
+                  </TextField>
+                  <TextField
                     fullWidth
                     placeholder="输入文件关键词…"
                     value={keyword}
@@ -858,11 +943,12 @@ export default function FilesPage() {
                   overflow: "hidden",
                 }}
               >
-                <Table sx={{ minWidth: 860 }}>
+                <Table sx={{ minWidth: 980 }}>
                   <TableHead>
                     <TableRow sx={{ bgcolor: alpha(theme.palette.primary.main, 0.05) }}>
                       <TableCell padding="checkbox" />
                       <TableCell>文件</TableCell>
+                      <TableCell>最后修改</TableCell>
                       <TableCell align="right">操作</TableCell>
                     </TableRow>
                   </TableHead>
@@ -908,6 +994,11 @@ export default function FilesPage() {
                                   </Typography>
                                 </Box>
                               </Stack>
+                            </TableCell>
+                            <TableCell sx={{ whiteSpace: "nowrap" }}>
+                              <Typography variant="body2" color="text.secondary">
+                                {formatDate(getFileModifiedAt(file)) || "—"}
+                              </Typography>
                             </TableCell>
                             <TableCell align="right">
                               <Stack
@@ -983,6 +1074,11 @@ export default function FilesPage() {
                               </MuiLink>
                             </Stack>
                           </TableCell>
+                          <TableCell>
+                            <Typography variant="body2" color="text.disabled">
+                              —
+                            </Typography>
+                          </TableCell>
                           <TableCell />
                         </TableRow>
                       );
@@ -997,6 +1093,9 @@ export default function FilesPage() {
                           <TableCell>
                             <Skeleton variant="text" width="55%" sx={{ fontSize: 20 }} />
                           </TableCell>
+                          <TableCell>
+                            <Skeleton variant="text" width={120} sx={{ fontSize: 18 }} />
+                          </TableCell>
                           <TableCell align="right">
                             <Stack direction="row" spacing={1.5} justifyContent="flex-end">
                               <Skeleton variant="rounded" width={56} height={30} />
@@ -1009,7 +1108,7 @@ export default function FilesPage() {
 
                     {!operating && filteredEntries.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={3}>
+                        <TableCell colSpan={4}>
                           <Stack alignItems="center" spacing={1.5} sx={{ py: 8, textAlign: "center" }}>
                             <Box
                               sx={{

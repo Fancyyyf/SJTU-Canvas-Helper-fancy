@@ -68,6 +68,9 @@ export interface File {
     mime_class: string;
     "content-type": string;
     size: number;
+    created_at?: Option<string>;
+    updated_at?: Option<string>;
+    modified_at?: Option<string>;
     external_type?: "File" | "Link";
     external_title?: string;
 }
