@@ -3,7 +3,9 @@ use std::{fs, path::Path};
 use super::App;
 use crate::{
     error::{AppError, Result},
-    model::{CanvasVideo, Course, ProgressPayload, Subject, VideoCourse, VideoInfo, VideoPlayInfo},
+    model::{
+        CanvasVideo, Course, ProgressPayload, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
+    },
 };
 // Apis for course video
 impl App {
@@ -52,10 +54,6 @@ impl App {
         }
     }
 
-    pub async fn get_subjects(&self) -> Result<Vec<Subject>> {
-        self.client.get_subjects().await
-    }
-
     pub async fn list_video_space_courses(&self) -> Result<Vec<Course>> {
         self.client.list_video_space_courses().await
     }
@@ -64,13 +62,48 @@ impl App {
         self.client.get_video_space_videos(teaching_class_id).await
     }
 
+    pub async fn get_legacy_videos(
+        &self,
+        course_id: i64,
+        course_name: &str,
+        term_name: &str,
+        teacher_names: &[String],
+    ) -> Result<Vec<CanvasVideo>> {
+        self.client
+            .get_legacy_videos(course_id, course_name, term_name, teacher_names)
+            .await
+    }
+
     pub async fn get_video_info(&self, video_id: i64) -> Result<VideoInfo> {
-        let consumer_key = &self.config.read().await.oauth_consumer_key;
-        self.client.get_video_info(video_id, consumer_key).await
+        let mut consumer_key = self.config.read().await.oauth_consumer_key.clone();
+        if consumer_key.is_empty() {
+            consumer_key = self.client.get_oauth_consumer_key().await?.ok_or_else(|| {
+                AppError::VideoDownloadError(
+                    "Legacy video authorization key is unavailable".to_string(),
+                )
+            })?;
+            let mut config = self.get_config().await;
+            config.oauth_consumer_key = consumer_key.clone();
+            self.save_config(config).await?;
+        }
+        self.client.get_video_info(video_id, &consumer_key).await
     }
 
     pub async fn get_canvas_video_info(&self, video_id: &str) -> Result<VideoInfo> {
         self.client.get_canvas_video_info(video_id).await
+    }
+
+    pub async fn get_video_play_info(
+        &self,
+        source: VideoSource,
+        video_id: &str,
+    ) -> Result<VideoInfo> {
+        match source {
+            VideoSource::Canvas | VideoSource::VideoSpace => {
+                self.get_canvas_video_info(video_id).await
+            }
+            VideoSource::Legacy => self.client.get_legacy_video_info(video_id).await,
+        }
     }
 
     pub async fn get_canvas_videos(&self, course_id: i64) -> Result<Vec<CanvasVideo>> {

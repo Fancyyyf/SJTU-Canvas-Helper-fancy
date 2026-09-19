@@ -362,23 +362,6 @@ export interface LoginMessage {
     type: string;
 }
 
-export interface Subject {
-    subjectId: number;
-    csplId: number;
-    subjectName: string;
-    classroomId: number;
-    classroomName: string;
-    userId: number;
-    userName: string;
-    courTimes: number;
-    subjImgUrl: string;
-    teclId: number;
-    teclName: string;
-    termTime: number;
-    beginYear: number;
-    endYear: number;
-}
-
 export interface VideoCourse {
     videPlayCount: number;
     videCommentAverage: number;
@@ -401,6 +384,7 @@ export interface VideoCourse {
 }
 
 export interface CanvasVideo {
+    source: VideoSource;
     videoId: string;
     userName: string;
     videoName: string;
@@ -415,6 +399,8 @@ export interface CanvasVideo {
     availability: "ready" | "repairing" | "unavailable";
     availabilityLabel: string;
 }
+
+export type VideoSource = "canvas" | "videoSpace" | "legacy";
 
 export interface Video {
     id: number;
