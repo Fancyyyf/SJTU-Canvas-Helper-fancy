@@ -19,14 +19,14 @@ fn locate_failed_json_field(e: &serde_json::Error, json_str: &str) -> String {
 
     let error_line = lines[line - 1];
 
-    let start_idx = column.saturating_sub(20);
-    let end_idx = if column + 20 < error_line.len() {
-        column + 20
-    } else {
-        error_line.len()
-    };
-
-    let context = &error_line[start_idx..end_idx];
+    // serde_json reports a character column, while Rust string slices use byte
+    // offsets. Convert to chars before taking the diagnostic window so a JSON
+    // error next to Chinese text cannot split a UTF-8 code point and panic.
+    let chars: Vec<char> = error_line.chars().collect();
+    let column_idx = column.saturating_sub(1).min(chars.len());
+    let start_idx = column_idx.saturating_sub(20);
+    let end_idx = column_idx.saturating_add(20).min(chars.len());
+    let context: String = chars[start_idx..end_idx].iter().collect();
 
     format!("...{context}...")
 }
@@ -78,6 +78,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         println!("{err}");
+
+        // Error diagnostics must remain safe around multi-byte UTF-8 text.
+        json = r#"{"padding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","age":"学院"}"#;
+        let result = parse_json::<Person>(json.as_bytes());
+        assert!(result.is_err());
 
         Ok(())
     }

@@ -546,25 +546,6 @@ pub struct PageInfo {
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Subject {
-    pub subject_id: i64,
-    pub cspl_id: i64,
-    pub subject_name: String,
-    pub classroom_id: i64,
-    pub classroom_name: String,
-    pub user_id: i64,
-    pub user_name: String,
-    pub cour_times: i64,
-    pub subj_img_url: String,
-    pub tecl_id: i64,
-    pub tecl_name: String,
-    pub term_time: i64,
-    pub begin_year: i64,
-    pub end_year: i64,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct VideoCourse {
     pub vide_play_count: i64,
     pub vide_comment_average: f64,
@@ -1136,6 +1117,7 @@ impl FoldersAndFiles {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasVideo {
+    pub source: VideoSource,
     pub video_id: String,
     pub user_name: String,
     pub video_name: String,
@@ -1149,6 +1131,15 @@ pub struct CanvasVideo {
     pub playable: bool,
     pub availability: String,
     pub availability_label: String,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VideoSource {
+    #[default]
+    Canvas,
+    VideoSpace,
+    Legacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

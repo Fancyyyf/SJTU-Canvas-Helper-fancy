@@ -4,7 +4,7 @@ use std::process;
 use dirs::config_dir;
 use error::{AppError, Result};
 use futures::StreamExt;
-use reqwest::StatusCode;
+use reqwest::{header::TE, StatusCode};
 use rust_xlsxwriter::Workbook;
 use std::convert::Infallible;
 use std::{
@@ -45,6 +45,7 @@ async fn proxy_video_request(
     route_name: &'static str,
     upstream_base: &'static str,
     referer: &'static str,
+    origin: &'static str,
     tail: warp::path::Tail,
     query: String,
     headers: warp::http::HeaderMap,
@@ -91,9 +92,18 @@ async fn proxy_video_request(
     }
 
     let client = reqwest::Client::new();
-    let mut request = client.get(&url).header("Referer", referer);
+    let mut request = client
+        .get(&url)
+        .header("Referer", referer)
+        .header("Origin", origin)
+        .header("Accept-Encoding", "identity");
     if !range_value.is_empty() {
         request = request.header("Range", range_value);
+    }
+    for name in ["If-Range", "Accept", "User-Agent"] {
+        if let Some(value) = headers.get(name) {
+            request = request.header(name, value.as_bytes());
+        }
     }
 
     match request.send().await {
@@ -132,41 +142,28 @@ async fn proxy_video_request(
             );
             let mut builder = Response::builder().status(status);
             for (key, value) in response.headers() {
-                if matches!(
-                    key.as_str(),
-                    "connection"
-                        | "access-control-allow-origin"
-                        | "keep-alive"
-                        | "proxy-authenticate"
-                        | "proxy-authorization"
-                        | "te"
-                        | "trailer"
-                        | "transfer-encoding"
-                        | "upgrade"
-                ) {
-                    continue;
+                if key.as_str() != TE.as_str()
+                    && !matches!(
+                        key.as_str(),
+                        "connection"
+                            | "keep-alive"
+                            | "proxy-authenticate"
+                            | "proxy-authorization"
+                            | "trailer"
+                            | "transfer-encoding"
+                            | "upgrade"
+                    )
+                {
+                    builder = builder.header(key, value);
                 }
-                builder = builder.header(key, value);
             }
-            builder = builder.header("Access-Control-Allow-Origin", "*");
-            builder = builder.header("Access-Control-Allow-Private-Network", "true");
-            builder = builder.header(
+            builder = builder.header("Access-Control-Allow-Origin", "*").header(
                 "Access-Control-Expose-Headers",
-                "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+                "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
             );
-            builder = builder.header("Accept-Ranges", "bytes");
-            let stream_trace_id = trace_id.clone();
-            let stream = response.bytes_stream().map(move |chunk| {
-                chunk.map_err(|error| {
-                    tracing::error!(
-                        trace_id = %stream_trace_id,
-                        route = route_name,
-                        error = %error,
-                        "Video proxy response stream failed"
-                    );
-                    std::io::Error::other(error)
-                })
-            });
+            let stream = response
+                .bytes_stream()
+                .map(|chunk| chunk.map_err(std::io::Error::other));
             let body = warp::hyper::Body::wrap_stream(stream);
             Ok(builder.body(body).unwrap())
         }
@@ -495,6 +492,7 @@ impl App {
                     "live-media",
                     "https://live.sjtu.edu.cn",
                     "https://courses.sjtu.edu.cn",
+                    "https://courses.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
@@ -508,10 +506,37 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|trace_id, tail, query, headers| {
                 proxy_video_request(
-                    trace_id,
-                    "canvas-media",
-                    "https://videos.sjtu.edu.cn",
-                    "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/",
+                    "https://videos.sjtu.edu.cn/vod",
+                    "https://v.sjtu.edu.cn/",
+                    "https://v.sjtu.edu.cn",
+                    tail,
+                    query,
+                    headers,
+                )
+            });
+        let legacy_canvas_video_proxy = warp::get()
+            .and(warp::path("legacy-vod").and(warp::path::tail()))
+            .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
+            .and(warp::header::headers_cloned())
+            .and_then(|tail, query, headers| {
+                proxy_video_request(
+                    "https://videos.sjtu.edu.cn/vod",
+                    "https://courses.sjtu.edu.cn/",
+                    "https://courses.sjtu.edu.cn",
+                    tail,
+                    query,
+                    headers,
+                )
+            });
+        let canvas_live_proxy = warp::get()
+            .and(warp::path("canvas-live").and(warp::path::tail()))
+            .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
+            .and(warp::header::headers_cloned())
+            .and_then(|tail, query, headers| {
+                proxy_video_request(
+                    "https://live.sjtu.edu.cn",
+                    "https://v.sjtu.edu.cn/",
+                    "https://v.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
@@ -587,12 +612,11 @@ impl App {
                     .unwrap()
             });
 
-        let routes = proxy_preflight
-            .or(live_video_proxy)
+        let routes = legacy_video_proxy
+            .or(legacy_canvas_video_proxy)
             .or(canvas_video_proxy)
-            .or(mss_live_proxy)
-            .or(ready_check)
-            .or(proxy_not_found);
+            .or(canvas_live_proxy)
+            .or(ready_check);
         let handle = tokio::spawn(warp::serve(routes).run(([127, 0, 0, 1], proxy_port)));
         *self.handle.write().await = Some(handle);
 

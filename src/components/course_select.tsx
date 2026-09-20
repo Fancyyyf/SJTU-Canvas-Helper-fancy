@@ -20,13 +20,15 @@ export default function CourseSelect({
   disabled,
   onChange,
   value,
-  includeAllOption = false,
+  getSourceLabel,
+  compareCourses,
 }: {
   courses: Course[];
   disabled?: boolean;
   onChange?: (courseId: number) => void;
   value?: number;
-  includeAllOption?: boolean;
+  getSourceLabel?: (course: Course) => string | undefined;
+  compareCourses?: (a: Course, b: Course) => number;
 }) {
   const formatCourseName = (course: Course): string => {
     if (course.id === ALL_COURSES_ID) return "全部课程（当前学期范围）";
@@ -42,33 +44,13 @@ export default function CourseSelect({
   };
 
   const formattedCourses = useMemo(() => {
-    const formatted = [...courses]
+    return [...courses]
+      .sort(compareCourses ?? ((a, b) => b.term.id - a.term.id))
       .map((course) => ({
         ...course,
-        name: formatCourseName(course),
-      }))
-      .sort((a, b) => b.term.id - a.term.id);
-    if (includeAllOption && courses.length > 0) {
-      formatted.unshift({
-        id: ALL_COURSES_ID,
-        uuid: "all-courses",
-        name: "全部课程（当前学期范围）",
-        course_code: "",
-        enrollments: [],
-        access_restricted_by_date: false,
-        teachers: [],
-        term: {
-          id: -1,
-          name: "当前学期范围",
-          start_at: null,
-          end_at: null,
-          created_at: null,
-          workflow_state: "available",
-        },
-      });
-    }
-    return formatted;
-  }, [courses, includeAllOption]);
+        name: [formatCourseName(course), getSourceLabel?.(course)].filter(Boolean).join(" | "),
+      }));
+  }, [courses, getSourceLabel, compareCourses]);
 
   const selectedCourse =
     formattedCourses.find((course) => course.id === value) ?? null;
@@ -151,6 +133,7 @@ export default function CourseSelect({
                   {option.name.split(" | ")[0]}
                 </Typography>
                 {isTA ? <Chip size="small" color="error" label="助教" /> : null}
+                {getSourceLabel?.(option) ? <Chip size="small" color="primary" variant="outlined" label={getSourceLabel(option)} /> : null}
               </Box>
               <Box
                 sx={{

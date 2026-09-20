@@ -32,7 +32,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DraggableData, DraggableEvent } from "react-draggable";
 import Draggable from "react-draggable";
 import { Link as RouterLink } from "react-router-dom";
@@ -51,12 +51,14 @@ import { WorkspaceHero } from "../components/workspace_hero";
 import videoStyles from "../css/video_player.module.css";
 import { getConfig } from "../lib/config";
 import { VIDEO_PAGE_HINT_ALERT_KEY } from "../lib/constants";
-import { useCourses, useSelectedCourse, useAutoLoadCourse } from "../lib/hooks";
+import { useCourses } from "../lib/hooks";
+import { compareVideoCourses, loadVideoCourse, mergeVideoCourses } from "../lib/video_courses";
 import { useAppMessage } from "../lib/message";
 import { useTauriEvent } from "../lib/events";
 import { logDiagnostic, logHandledError } from "../lib/logger";
 import {
   CanvasVideo,
+  Course,
   DownloadTask,
   LLMChatMessage,
   LOG_LEVEL_ERROR,
@@ -87,69 +89,32 @@ function isVideoUnavailableError(error: unknown): boolean {
   return String(error).includes("No playable video source");
 }
 
-function createPlaybackTraceId(): string {
-  return typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function describePlaybackUrl(value: string): Record<string, unknown> {
-  try {
-    const url = new URL(value);
-    const pathSegments = url.pathname.split("/").filter(Boolean);
-    const lastSegment = pathSegments[pathSegments.length - 1] ?? "";
-    const extensionSegments = lastSegment.split(".");
-    return {
-      valid: true,
-      protocol: url.protocol,
-      hostname: url.hostname,
-      port: url.port || "<default>",
-      pathSegments: pathSegments.length,
-      extension: lastSegment.includes(".")
-        ? extensionSegments[extensionSegments.length - 1]?.toLowerCase()
-        : "<none>",
-      queryParameterNames: [...new Set(url.searchParams.keys())].sort(),
-    };
-  } catch {
-    return { valid: false, present: Boolean(value) };
-  }
-}
-
-function describeMediaState(player: HTMLMediaElement | null): Record<string, unknown> {
-  if (!player) return { present: false };
-  const buffered = Array.from({ length: player.buffered.length }, (_, index) => ({
-    start: player.buffered.start(index),
-    end: player.buffered.end(index),
-  }));
+function videoSourceLabel(source: CanvasVideo["source"]): string {
   return {
-    present: true,
-    readyState: player.readyState,
-    networkState: player.networkState,
-    paused: player.paused,
-    ended: player.ended,
-    currentTime: player.currentTime,
-    duration: Number.isFinite(player.duration) ? player.duration : null,
-    buffered,
-    videoWidth: player instanceof HTMLVideoElement ? player.videoWidth : undefined,
-    videoHeight: player instanceof HTMLVideoElement ? player.videoHeight : undefined,
-  };
+    canvas: "Canvas",
+    videoSpace: "视频空间",
+    legacy: "旧版课堂视频",
+  }[source];
 }
 
-function logPlayback(
-  traceId: string,
-  phase: string,
-  details: Record<string, unknown> = {},
-  error = false
-) {
-  logDiagnostic({
-    level: error ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
-    code: `VIDEO.${phase.replace(/\./g, "_").toUpperCase()}`,
-    scope: "video.playback",
-    action: phase,
-    outcome: error ? "failed" : phase.endsWith("begin") ? "started" : "success",
-    recoverable: true,
-    traceId,
-    context: details,
+const videoOptionId = (video: CanvasVideo) => `${video.source}:${video.videoId}`;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error(`${label}请求超时（${timeoutMs / 1000} 秒）`)),
+      timeoutMs
+    );
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
   });
 }
 
@@ -157,14 +122,51 @@ export default function VideoPage() {
   const [videoDownloadTasks, setVideoDownloadTasks] = useState<VideoDownloadTask[]>([]);
   const [pptDownloadTasks, setPPTDownloadTasks] = useState<DownloadTask[]>([]);
   const [operating, setOperating] = useState(false);
-  const courses = useCourses();
+  const [videosLoading, setVideosLoading] = useState(false);
+  const canvasCourses = useCourses();
+  const [spaceCourses, setSpaceCourses] = useState<Course[]>([]);
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [coursesError, setCoursesError] = useState("");
+  const [courseRefresh, setCourseRefresh] = useState(0);
+  const mergedCourses = useMemo(
+    () => mergeVideoCourses(canvasCourses.data, spaceCourses),
+    [canvasCourses.data, spaceCourses]
+  );
+  const courses = { data: mergedCourses };
   const [messageApi, contextHolder] = useAppMessage();
   const [plays, setPlays] = useState<VideoPlayInfo[]>([]);
   const [selectedVideo, setSelectedVideo] = useState<CanvasVideo | undefined>();
-  const { selectedCourseId, setSelectedCourseId } = useSelectedCourse();
+  const [selectedCourseId, setSelectedCourseId] = useState(-1);
   const [videos, setVideos] = useState<CanvasVideo[]>([]);
   const [notLogin, setNotLogin] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!loaded || notLogin) return;
+    let cancelled = false;
+    setCoursesLoading(true);
+    setCoursesError("");
+    setSpaceCourses([]);
+    void (async () => {
+      const spaceTask = withTimeout(
+        invoke<Course[]>("list_video_space_courses"),
+        30_000,
+        "视频空间"
+      ).then((result) => {
+        if (!cancelled) setSpaceCourses(result);
+        return result;
+      });
+      const [spaceResult] = await Promise.allSettled([spaceTask]);
+      if (!cancelled) {
+        const errors: string[] = [];
+        if (spaceResult.status === "rejected") {
+          errors.push(`视频空间：${String(spaceResult.reason)}`);
+        }
+        setCoursesError(errors.join("；"));
+        setCoursesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loaded, notLogin, courseRefresh]);
   const [playURLs, setPlayURLs] = useState<string[]>([]);
   const [mainPlayURL, setMainPlayURL] = useState("");
   const [mutedPlayURL, setMutedPlayURL] = useState("");
@@ -351,6 +353,7 @@ export default function VideoPage() {
 
   const handleSelectCourse = async (selected: number) => {
     setOperating(true);
+    setVideosLoading(selected !== -1);
     setSelectedCourseId(selected);
     setVideos([]);
     setSelectedVideo(undefined);
@@ -358,14 +361,18 @@ export default function VideoPage() {
     setPlays([]);
     setMainPlayURL("");
     setMutedPlayURL("");
-    await handleGetVideos(selected);
-    setOperating(false);
+    try {
+      if (selected !== -1) await handleGetVideos(selected);
+    } finally {
+      setVideosLoading(false);
+      setOperating(false);
+    }
   };
 
-  useAutoLoadCourse(
-    (courseId) => void handleSelectCourse(courseId),
-    courses.data.length > 0
-  );
+  const getVideoInfo = (video: CanvasVideo) => invoke<VideoInfo>("get_video_play_info", {
+    source: video.source,
+    videoId: video.videoId,
+  });
 
   const handleGetVideoInfo = async (video: CanvasVideo) => {
     if (!video.playable) {
@@ -373,9 +380,7 @@ export default function VideoPage() {
       return;
     }
     try {
-      const videoInfo = (await invoke("get_canvas_video_info", {
-        videoId: video.videoId,
-      })) as VideoInfo;
+      const videoInfo = await getVideoInfo(video);
       const nextPlays = videoInfo.videoPlayResponseVoList;
       nextPlays.forEach((play, index) => {
         play.key = play.id;
@@ -395,7 +400,7 @@ export default function VideoPage() {
   };
 
   const handleSelectVideo = async (selected: string) => {
-    const video = videos.find((item) => item.videoId === selected);
+    const video = videos.find((item) => videoOptionId(item) === selected);
     if (video) {
       setPlays([]);
       setPlayURLs([]);
@@ -408,9 +413,19 @@ export default function VideoPage() {
 
   const handleGetVideos = async (courseId: number) => {
     try {
-      const nextVideos = (await invoke("get_canvas_videos", {
-        courseId,
-      })) as CanvasVideo[];
+      const course = mergedCourses.find((item) => item.id === courseId);
+      if (!course) return;
+      const nextVideos = await loadVideoCourse(
+        course,
+        (id) => invoke<CanvasVideo[]>("get_canvas_videos", { courseId: id }),
+        (id) => invoke<CanvasVideo[]>("get_video_space_videos", { teachingClassId: id }),
+        (id) => invoke<CanvasVideo[]>("get_legacy_videos", {
+          courseId: id,
+          courseName: course.name,
+          termName: course.term.name,
+          teacherNames: course.teachers.map((teacher) => teacher.display_name),
+        }),
+      );
       setVideos(nextVideos);
     } catch (error) {
       messageApi.error(`获取录像时发生了错误：${error}`);
@@ -440,6 +455,10 @@ export default function VideoPage() {
       messageApi.warning("请先选择一个视频");
       return;
     }
+    if (selectedVideo.source === "legacy") {
+      messageApi.info("旧版课堂视频不提供字幕");
+      return;
+    }
     try {
       const outputPath = await save({
         defaultPath: `${selectedVideo.videoName}.srt`,
@@ -448,9 +467,7 @@ export default function VideoPage() {
       if (!outputPath) {
         return;
       }
-      const videoInfo = (await invoke("get_canvas_video_info", {
-        videoId: selectedVideo.videoId,
-      })) as VideoInfo;
+      const videoInfo = await getVideoInfo(selectedVideo);
       await invoke("download_subtitle", {
         canvasCourseId: videoInfo.courId,
         savePath: outputPath,
@@ -470,10 +487,12 @@ export default function VideoPage() {
       messageApi.warning("请先选择一个视频");
       return;
     }
+    if (selectedVideo.source === "legacy") {
+      messageApi.info("旧版课堂视频不提供字幕，暂时无法进行 AI 总结");
+      return;
+    }
     try {
-      const videoInfo = (await invoke("get_canvas_video_info", {
-        videoId: selectedVideo.videoId,
-      })) as VideoInfo;
+      const videoInfo = await getVideoInfo(selectedVideo);
       const openingUserMessage = createConversationMessage(
         "user",
         "请先总结这节课的核心内容。重点关注课程活动与通知、作业/小测/考试/签到提醒，以及主要知识点与框架；如果合适，请引用对应的字幕时间点。"
@@ -546,7 +565,12 @@ export default function VideoPage() {
   };
 
   const handleDownloadPPT = async (videoId: string, saveName: string) => {
-    const videoInfo = (await invoke("get_canvas_video_info", { videoId })) as VideoInfo;
+    if (!selectedVideo) return;
+    if (selectedVideo.source === "legacy") {
+      messageApi.info("旧版课堂视频不提供 PPT 切片");
+      return;
+    }
+    const videoInfo = await getVideoInfo({ ...selectedVideo, videoId });
     const courseId = videoInfo.courId;
     const outputPath = await save({
       defaultPath: saveName,
@@ -628,146 +652,48 @@ export default function VideoPage() {
   const getVidePlayURL = (
     play: VideoPlayInfo,
     proxyPort: number,
-    traceId: string
-  ): string => {
+    source?: CanvasVideo["source"],
+  ) => {
     try {
-      const rawURL = play.rtmpUrlHdv.trim();
-      const source = new URL(rawURL.startsWith("//") ? `https:${rawURL}` : rawURL);
-      const proxyBase = `http://127.0.0.1:${proxyPort}`;
-
-      if (source.hostname.toLowerCase() === "videos.sjtu.edu.cn") {
-        return `${proxyBase}/canvas-media/${traceId}${source.pathname}${source.search}`;
+      const upstream = new URL(play.rtmpUrlHdv);
+      if (upstream.hostname === "videos.sjtu.edu.cn" && upstream.pathname.startsWith("/vod/")) {
+        const route = source === "legacy" ? "legacy-vod" : "canvas-vod";
+        return `http://localhost:${proxyPort}/${route}/${upstream.pathname.slice(5)}${upstream.search}`;
       }
-      if (source.hostname.toLowerCase() === "live.sjtu.edu.cn") {
-        return `${proxyBase}/live-media/${traceId}${source.pathname}${source.search}`;
+      if (upstream.hostname === "live.sjtu.edu.cn" && upstream.pathname.startsWith("/vod/")) {
+        return `http://localhost:${proxyPort}${upstream.pathname}${upstream.search}`;
+      }
+      if (upstream.hostname === "live.sjtu.edu.cn") {
+        return `http://localhost:${proxyPort}/canvas-live${upstream.pathname}${upstream.search}`;
       }
     } catch {
-      // The caller displays a user-facing error for malformed source URLs.
+      // Keep the original URL so the player can surface a useful media error.
     }
-    return "";
+    return play.rtmpUrlHdv;
   };
 
-  const checkOrStartProxy = async (traceId: string): Promise<boolean> => {
-    const showPreparing = firstPlay.current;
-    const started = performance.now();
-    logPlayback(traceId, "proxy.prepare.begin", { showPreparing });
-    if (showPreparing) {
-      messageApi.open({
-        key: "proxy_preparing",
-        type: "loading",
-        content: "正在启动反向代理...",
-        duration: 0,
-      });
-    }
-
-    try {
-      const succeed = (await invoke("prepare_proxy", { traceId })) as boolean;
-      logPlayback(traceId, "proxy.prepare.result", {
-        succeed,
-        elapsedMs: Math.round(performance.now() - started),
-      });
-      if (succeed) {
-        messageApi.destroy("proxy_preparing");
-        if (showPreparing) {
-          messageApi.success("反向代理启动成功", 0.5);
-        }
-        firstPlay.current = false;
-        return true;
-      }
-      messageApi.destroy("proxy_preparing");
-      messageApi.error("反向代理启动超时，已取消播放");
-    } catch (error) {
-      logPlayback(
-        traceId,
-        "proxy.prepare.error",
-        {
-          elapsedMs: Math.round(performance.now() - started),
-          errorType: error instanceof Error ? error.name : typeof error,
-        },
-        true
-      );
-      messageApi.destroy("proxy_preparing");
-      messageApi.error(`反向代理启动失败：${error}`);
-    }
-    firstPlay.current = true;
-    await invoke("stop_proxy", { traceId }).catch(() => undefined);
-    return false;
-  };
-
-  const probeVideoSource = async (playURL: string, traceId: string): Promise<boolean> => {
-    const started = performance.now();
-    logPlayback(traceId, "probe.begin", {
-      target: describePlaybackUrl(playURL),
-      documentOrigin: window.location.origin,
-      secureContext: window.isSecureContext,
-      online: navigator.onLine,
+  const checkOrStartProxy = async (): Promise<boolean> => {
+    if (!firstPlay.current) return true;
+    messageApi.open({
+      key: "proxy_preparing",
+      type: "loading",
+      content: "正在启动反向代理...",
+      duration: 0,
     });
     try {
-      const response = await fetch(playURL, {
-        cache: "no-store",
-        headers: { Range: "bytes=0-1" },
-      });
-      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-      const responseMetadata = {
-        status: response.status,
-        statusText: response.statusText,
-        responseType: response.type,
-        contentType: contentType || "<missing>",
-        contentLength: response.headers.get("content-length") ?? "<missing>",
-        contentRange: response.headers.get("content-range") ?? "<missing>",
-        acceptRanges: response.headers.get("accept-ranges") ?? "<missing>",
-        elapsedMs: Math.round(performance.now() - started),
-      };
-      await response.body?.cancel();
-
-      if (!response.ok) {
-        logPlayback(traceId, "probe.http_error", responseMetadata, true);
-        messageApi.error(`视频代理返回异常状态（HTTP ${response.status}），已取消播放`);
+      const succeed = await invoke<boolean>("prepare_proxy");
+      messageApi.destroy("proxy_preparing");
+      if (!succeed) {
+        messageApi.error("反向代理启动超时");
+        void invoke("stop_proxy");
         return false;
       }
-
-      const looksLikeVideo =
-        !contentType ||
-        contentType.startsWith("video/") ||
-        contentType.includes("mp4") ||
-        contentType.includes("octet-stream");
-      if (!looksLikeVideo) {
-        logPlayback(traceId, "probe.non_video_response", responseMetadata, true);
-        messageApi.error(`视频代理返回了非视频内容（${contentType}），已取消播放`);
-        return false;
-      }
-
-      logPlayback(traceId, "probe.success", responseMetadata);
+      firstPlay.current = false;
+      messageApi.success("反向代理启动成功", 0.5);
       return true;
     } catch (error) {
-      let sourceMetadata: Record<string, unknown> = { valid: false };
-      try {
-        const source = new URL(playURL);
-        sourceMetadata = {
-          valid: true,
-          protocol: source.protocol,
-          hostname: source.hostname,
-          port: source.port,
-          proxyRoute: source.pathname.startsWith("/canvas-media/")
-            ? "canvas-media"
-            : source.pathname.startsWith("/live-media/")
-              ? "live-media"
-              : "unknown",
-        };
-      } catch {
-        // Keep the diagnostic free of the original signed URL.
-      }
-      logPlayback(
-        traceId,
-        "probe.fetch_error",
-        {
-          elapsedMs: Math.round(performance.now() - started),
-          errorType: error instanceof Error ? error.name : typeof error,
-          source: sourceMetadata,
-        },
-        true
-      );
-      messageApi.error("WebView 无法访问本地视频代理，已取消播放；请重启应用后重试");
+      messageApi.destroy("proxy_preparing");
+      messageApi.error(`反向代理启动失败：${error}`);
       return false;
     }
   };
@@ -784,21 +710,8 @@ export default function VideoPage() {
       userAgent: navigator.userAgent,
     });
     const config = await getConfig();
-    const playURL = getVidePlayURL(play, config.proxy_port, traceId);
-    if (!playURL) {
-      messageApi.error("学校返回的视频地址无效或来源暂不受支持，已取消播放");
-      logPlayback(
-        traceId,
-        "play.unsupported_source",
-        { source: sourceMetadata },
-        true
-      );
-      return;
-    }
-    logPlayback(traceId, "play.proxy_url_built", {
-      proxy: describePlaybackUrl(playURL),
-      proxyPort: config.proxy_port,
-    });
+    const playURL = getVidePlayURL(play, config.proxy_port, selectedVideo?.source);
+    const needsProxy = playURL.startsWith(`http://localhost:${config.proxy_port}/`);
     if (playURL === mainPlayURL || playURL === mutedPlayURL) {
       messageApi.warning("已经在播放啦");
       return;
@@ -807,12 +720,7 @@ export default function VideoPage() {
       messageApi.error("目前只支持双屏观看");
       return;
     }
-    if (!(await checkOrStartProxy(traceId))) {
-      return;
-    }
-    if (!(await probeVideoSource(playURL, traceId))) {
-      return;
-    }
+    if (needsProxy && !(await checkOrStartProxy())) return;
 
     if (!mainPlayURL) {
       setPlaybackError("");
@@ -1051,10 +959,12 @@ export default function VideoPage() {
         setSubtitleUrl(undefined);
         return;
       }
+      if (selectedVideo.source === "legacy") {
+        setSubtitleUrl(undefined);
+        return;
+      }
       try {
-        const videoInfo = (await invoke("get_canvas_video_info", {
-          videoId: selectedVideo.videoId,
-        })) as VideoInfo;
+        const videoInfo = await getVideoInfo(selectedVideo);
         const srt = (await invoke("get_subtitle", {
           canvasCourseId: videoInfo.courId,
         })) as string;
@@ -1072,6 +982,7 @@ export default function VideoPage() {
   const selectedCourse = courses.data.find((course) =>
     course.id === selectedCourseId
   );
+  const supportsEnrichment = selectedVideo?.source !== "legacy";
 
   return (
     <BasicLayout>
@@ -1141,11 +1052,41 @@ export default function VideoPage() {
                 alignSelf: { xs: "stretch", lg: "flex-start" },
                 }}
               >
-                <CourseSelect
-                  courses={courses.data}
-                  onChange={(courseId) => setSelectedCourseId(courseId)}
-                  value={selectedCourseId > 0 ? selectedCourseId : undefined}
-                />
+                <Stack spacing={1.5}>
+                  <CourseSelect
+                    courses={courses.data}
+                    compareCourses={compareVideoCourses}
+                    disabled={operating || canvasCourses.isLoading}
+                    onChange={(courseId) => void handleSelectCourse(courseId)}
+                    value={selectedCourseId !== -1 ? selectedCourseId : undefined}
+                    getSourceLabel={(course) => mergedCourses.find((item) => item.id === course.id)?.sourceLabel}
+                  />
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1}
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                    >
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        {coursesLoading && (
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5 }}>
+                            <CircularProgress size={16} thickness={5} />
+                            <Typography variant="caption" color="text.secondary">
+                              正在同步视频空间课程，Canvas 课程已可直接选择
+                            </Typography>
+                          </Stack>
+                        )}
+                        {coursesError && <Alert severity="warning">部分视频来源读取失败：{coursesError}。仍可选择其他来源，或刷新重试。</Alert>}
+                        {!coursesLoading && !coursesError && courses.data.length === 0 && (
+                          <Alert severity="info">暂无可用课程。</Alert>
+                        )}
+                      </Box>
+                      <Button disabled={operating || canvasCourses.isLoading} onClick={() => {
+                        void handleSelectCourse(-1);
+                        setCourseRefresh((value) => value + 1);
+                        void canvasCourses.mutate();
+                      }}>刷新课程</Button>
+                    </Stack>
+                </Stack>
               </Box>
             ) : undefined
           }
@@ -1185,60 +1126,83 @@ export default function VideoPage() {
                     alignItems: "start",
                   }}
                 >
-                  <TextField
-                    select
-                    label="选择视频"
-                    disabled={operating}
-                    value={selectedVideo?.videoId ?? ""}
-                    onChange={(event) =>
-                      void handleSelectVideo(String(event.target.value))
-                    }
-                    helperText={
-                      selectedVideo
-                        ? `当前视频：${selectedVideo.videoName}`
-                        : "选择一个课程后，这里会展示该课程的视频列表。"
-                    }
-                  >
-                    {videos.map((video) => (
+                  <Stack spacing={0.75}>
+                    <TextField
+                      select
+                      label="选择视频"
+                      disabled={operating || videosLoading || videos.length === 0}
+                      value={selectedVideo ? videoOptionId(selectedVideo) : ""}
+                      onChange={(event) =>
+                        void handleSelectVideo(String(event.target.value))
+                      }
+                      helperText={
+                        videosLoading
+                          ? "正在汇总当前课程的录像…"
+                          : selectedVideo
+                            ? `当前视频：${selectedVideo.videoName}`
+                            : selectedCourse && videos.length === 0
+                              ? "该课程暂无可用录像"
+                              : "选择一个课程后，这里会展示该课程的视频列表。"
+                      }
+                    >
+                      {videos.map((video) => (
                       <MenuItem
-                        key={video.videoId}
-                        value={video.videoId}
+                        key={videoOptionId(video)}
+                        value={videoOptionId(video)}
                         disabled={!video.playable}
                       >
                         <Stack
                           direction="row"
                           alignItems="center"
-                          justifyContent="space-between"
                           spacing={1}
                           sx={{ width: "100%" }}
                         >
-                          <Typography variant="body2" noWrap>
+                          <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
                             {`${video.videoName} ${video.courseBeginTime}`}
                           </Typography>
-                          {!video.playable && (
+                          <Stack
+                            direction="row"
+                            spacing={0.75}
+                            sx={{ ml: "auto", flexShrink: 0 }}
+                          >
                             <Chip
                               size="small"
-                              label={video.availabilityLabel}
-                              color={
-                                video.availability === "repairing"
-                                  ? "warning"
-                                  : "default"
-                              }
+                              label={videoSourceLabel(video.source)}
                               variant="outlined"
-                              sx={{ flexShrink: 0 }}
                             />
-                          )}
+                            {!video.playable && (
+                              <Chip
+                                size="small"
+                                label={video.availabilityLabel}
+                                color={
+                                  video.availability === "repairing"
+                                    ? "warning"
+                                    : "default"
+                                }
+                                variant="outlined"
+                              />
+                            )}
+                          </Stack>
                         </Stack>
                       </MenuItem>
-                    ))}
-                  </TextField>
+                      ))}
+                    </TextField>
+                    {videosLoading && (
+                      <Stack direction="row" spacing={1} alignItems="center" sx={{ px: 0.5 }}>
+                        <CircularProgress size={16} thickness={5} />
+                        <Typography variant="caption" color="text.secondary">
+                          正在读取新版课堂、视频空间和旧版课堂视频
+                        </Typography>
+                      </Stack>
+                    )}
+                  </Stack>
 
                   <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} useFlexGap flexWrap="wrap">
                     <Button
                       variant="outlined"
                       startIcon={<ClosedCaptionRoundedIcon />}
                       onClick={() => void handleDownloadSubtitle()}
-                      disabled={!selectedVideo}
+                      disabled={!selectedVideo || !supportsEnrichment}
                     >
                       下载字幕
                     </Button>
@@ -1251,7 +1215,7 @@ export default function VideoPage() {
                           `${selectedVideo?.videoName}.pdf`
                         )
                       }
-                      disabled={!selectedVideo}
+                      disabled={!selectedVideo || !supportsEnrichment}
                     >
                       下载 PPT
                     </Button>
@@ -1259,7 +1223,7 @@ export default function VideoPage() {
                       variant="contained"
                       startIcon={<PsychologyRoundedIcon />}
                       onClick={() => void handleSummarizeSubtitle()}
-                      disabled={!selectedVideo}
+                      disabled={!selectedVideo || !supportsEnrichment}
                     >
                       AI 总结
                     </Button>
