@@ -51,7 +51,14 @@ import { getConfig, saveConfig, updateConfig } from "../lib/config";
 import { useConfigDispatch, useQRCode } from "../lib/hooks";
 import { logDiagnostic, logHandledError } from "../lib/logger";
 import { useAppMessage } from "../lib/message";
-import { AccountInfo, AppConfig, LOG_LEVEL_INFO, LOG_LEVEL_WARN, User } from "../lib/model";
+import {
+  AccountInfo,
+  AppConfig,
+  LOG_LEVEL_INFO,
+  LOG_LEVEL_WARN,
+  SystemSettings,
+  User,
+} from "../lib/model";
 import { savePathValidator } from "../lib/utils";
 
 type AccountMode = "create" | "select";
@@ -241,6 +248,9 @@ export default function SettingsPage() {
   const [rawConfig, setRawConfig] = useState<string>("");
   const [showLogModal, setShowLogModal] = useState<boolean>(false);
   const [formData, setFormData] = useState<AppConfig | null>(null);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [initialSystemSettings, setInitialSystemSettings] = useState<string>("");
+  const [savingSystemSettings, setSavingSystemSettings] = useState(false);
   const [initialSnapshot, setInitialSnapshot] = useState<string>("");
   const [createAccountName, setCreateAccountName] = useState<string>("");
   const [showToken, setShowToken] = useState<boolean>(false);
@@ -316,7 +326,14 @@ export default function SettingsPage() {
     return JSON.stringify(formData) !== initialSnapshot;
   }, [formData, initialSnapshot]);
 
-  const loading = !formData;
+  const systemSettingsDirty = useMemo(() => {
+    if (!systemSettings || !initialSystemSettings) {
+      return false;
+    }
+    return JSON.stringify(systemSettings) !== initialSystemSettings;
+  }, [systemSettings, initialSystemSettings]);
+
+  const loading = !formData || !systemSettings;
 
   const parsedRawConfig = useMemo(() => {
     if (!rawConfig) {
@@ -455,7 +472,10 @@ export default function SettingsPage() {
   const initConfig = async () => {
     try {
       await initAccounts();
-      const config = await getConfig(true);
+      const [config, loadedSystemSettings] = await Promise.all([
+        getConfig(true),
+        invoke<SystemSettings>("get_system_settings"),
+      ]);
       const accountInfo = (await invoke("read_account_info")) as AccountInfo;
       const normalizedConfig: AppConfig = {
         ...config,
@@ -470,6 +490,8 @@ export default function SettingsPage() {
 
       setCurrentAccount(accountInfo.current_account);
       setFormData(normalizedConfig);
+      setSystemSettings(loadedSystemSettings);
+      setInitialSystemSettings(JSON.stringify(loadedSystemSettings));
       setInitialSnapshot(JSON.stringify(normalizedConfig));
       initialSnapshotRef.current = JSON.stringify(normalizedConfig);
       setTokenError("");
@@ -522,7 +544,7 @@ export default function SettingsPage() {
   }, [dispatch]);
 
   useEffect(() => {
-    if (!dirty) {
+    if (!dirty && !systemSettingsDirty) {
       return undefined;
     }
 
@@ -533,7 +555,23 @@ export default function SettingsPage() {
 
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [dirty]);
+  }, [dirty, systemSettingsDirty]);
+
+  const handleSaveSystemSettings = useCallback(async () => {
+    if (!systemSettings) {
+      return;
+    }
+    setSavingSystemSettings(true);
+    try {
+      await invoke("save_system_settings", { settings: systemSettings });
+      setInitialSystemSettings(JSON.stringify(systemSettings));
+      messageApi.success("系统行为设置已保存。");
+    } catch (error) {
+      messageApi.error(`保存系统行为设置失败：${error}`);
+    } finally {
+      setSavingSystemSettings(false);
+    }
+  }, [messageApi, systemSettings]);
 
   const validateForm = useCallback(async () => {
     if (!formData) {
@@ -1844,6 +1882,79 @@ export default function SettingsPage() {
             </Stack>
 
             <Stack spacing={3}>
+              <Card sx={cardSx}>
+                <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
+                  <Stack spacing={2.5}>
+                    <Box>
+                      <Typography variant="h5">系统行为</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        设置应用启动方式，以及点击窗口关闭按钮时的行为。
+                      </Typography>
+                    </Box>
+
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={systemSettings?.auto_start ?? false}
+                          onChange={(event) =>
+                            setSystemSettings((previous) =>
+                              previous
+                                ? { ...previous, auto_start: event.target.checked }
+                                : previous
+                            )
+                          }
+                        />
+                      }
+                      label="开机时自动启动"
+                    />
+
+                    <TextField
+                      select
+                      fullWidth
+                      label="点击关闭按钮时"
+                      value={systemSettings?.close_behavior ?? "minimize_to_tray"}
+                      onChange={(event) =>
+                        setSystemSettings((previous) =>
+                          previous
+                            ? {
+                                ...previous,
+                                close_behavior: event.target
+                                  .value as SystemSettings["close_behavior"],
+                              }
+                            : previous
+                        )
+                      }
+                      helperText="最小化后可通过托盘图标恢复窗口或彻底退出。"
+                    >
+                      <MenuItem value="minimize_to_tray">最小化到系统托盘</MenuItem>
+                      <MenuItem value="quit">直接退出应用</MenuItem>
+                    </TextField>
+
+                    <Divider />
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1.25}
+                      justifyContent="space-between"
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                    >
+                      <Typography variant="body2" color="text.secondary">
+                        {systemSettingsDirty
+                          ? "系统行为修改尚未保存。"
+                          : "系统行为已与本机设置同步。"}
+                      </Typography>
+                      <Button
+                        variant="contained"
+                        startIcon={<SaveRoundedIcon />}
+                        disabled={!systemSettingsDirty || savingSystemSettings}
+                        onClick={() => void handleSaveSystemSettings()}
+                      >
+                        {savingSystemSettings ? "保存中…" : "保存系统行为"}
+                      </Button>
+                    </Stack>
+                  </Stack>
+                </CardContent>
+              </Card>
+
               <Card sx={cardSx}>
                 <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
                   <Stack spacing={2}>

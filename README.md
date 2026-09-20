@@ -638,6 +638,8 @@ Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[�
 
 下面的流程只在当前 Windows 电脑生成本地 Release，不创建 GitHub Release、不切换 `release` 分支，也不向上游仓库上传文件。为了避免安装后的本地版本连接本项目预设的上游更新地址，构建命令还会通过临时配置关闭 Updater；该配置只对当前命令生效，不会修改 `src-tauri/tauri.conf.json`。
 
+在 Windows 上可直接运行 `yarn build:release:local`。脚本会使用本地构建配置生成 Release，并将可执行文件和安装包复制到仓库根目录的 `release/`，便于直接打开或分发；该目录不会提交到 Git。
+
 ##### 已经可以运行开发模式时
 
 如果当前项目已经能运行 `yarn tauri dev` 或 `yarn dev`，说明 `node_modules/` 中已经存在这次开发所需的前端依赖。只要以下内容没有变化，就不需要在每次 Release 构建前重新执行 `yarn install`：

@@ -285,6 +285,12 @@ export interface DownloadTask {
 
 export type DownloadState = "downloading" | "succeed" | "fail" | "wait_retry";
 export type Theme = "light" | "dark";
+export type CloseBehavior = "minimize_to_tray" | "quit";
+
+export interface SystemSettings {
+    auto_start: boolean;
+    close_behavior: CloseBehavior;
+}
 
 export interface LlmApiKeyEntry {
     name: string;

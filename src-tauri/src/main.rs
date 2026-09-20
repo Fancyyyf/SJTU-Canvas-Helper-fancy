@@ -1,20 +1,32 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{fs, io, path::Path, sync::Arc};
+use std::{
+    fs, io,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use error::{AppError, Result};
 use model::{
     Account, AccountInfo, AnnualReport, AppConfig, Assignment, AttendancePythonStatus,
-    AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, Colors, Course,
-    DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
+    AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, CloseBehavior, Colors,
+    Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
     FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel, ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, User,
-    UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
+    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, SystemSettings,
+    User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
 };
 use serde::{Deserialize, Serialize};
 
-use tauri::{Emitter, Runtime, Window};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, Runtime, Window,
+};
+use tauri_plugin_autostart::ManagerExt;
 use tracing::Level;
 use tracing_subscriber::{
     fmt::{self, writer::MakeWriterExt},
@@ -39,6 +51,55 @@ lazy_static! {
 }
 
 const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
+fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn sync_autostart<R: Runtime>(app: &tauri::AppHandle<R>, enabled: bool) -> Result<()> {
+    let result = if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    result
+        .map_err(|error| io::Error::other(format!("Unable to update autostart: {error}")).into())
+}
+
+fn install_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
+    let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("SJTU Canvas Helper")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
 
 fn rotate_log_if_oversized(log_dir: &str) -> io::Result<bool> {
     let current = Path::new(log_dir).join("app.log");
@@ -1015,6 +1076,26 @@ async fn stop_mcp_server() {
     APP.stop_mcp().await
 }
 
+#[tauri::command]
+fn get_system_settings(app: tauri::AppHandle) -> Result<SystemSettings> {
+    let mut settings = App::read_system_settings()?;
+    if let Ok(enabled) = app.autolaunch().is_enabled() {
+        settings.auto_start = enabled;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+fn save_system_settings(app: tauri::AppHandle, settings: SystemSettings) -> Result<()> {
+    sync_autostart(&app, settings.auto_start)?;
+    App::save_system_settings(&settings)?;
+    CLOSE_TO_TRAY.store(
+        settings.close_behavior == CloseBehavior::MinimizeToTray,
+        Ordering::Relaxed,
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // File logging must never prevent the application from starting. This can
@@ -1078,8 +1159,14 @@ async fn main() -> Result<()> {
     if APP.get_config().await.mcp_enabled {
         APP.start_mcp().await?;
     }
+    let initial_system_settings = App::read_system_settings().unwrap_or_default();
+    CLOSE_TO_TRAY.store(
+        initial_system_settings.close_behavior == CloseBehavior::MinimizeToTray,
+        Ordering::Relaxed,
+    );
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -1194,12 +1281,38 @@ async fn main() -> Result<()> {
             summarize_subtitle,
             // MCP server
             start_mcp_server,
-            stop_mcp_server
+            stop_mcp_server,
+            get_system_settings,
+            save_system_settings
         ])
+        .setup(move |app| {
+            install_tray(app)?;
+            if let Err(error) = sync_autostart(app.handle(), initial_system_settings.auto_start) {
+                tracing::warn!(
+                    error = %diagnostics::sanitize_text(&error.to_string()),
+                    "Unable to synchronize autostart during launch"
+                );
+            }
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                } else {
+                    app_handle.exit(0);
+                }
+            }
+            tauri::RunEvent::Exit => {
                 tracing::info!("App exiting, cleaning up MCP server");
                 let handle = std::thread::spawn(|| {
                     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1211,6 +1324,7 @@ async fn main() -> Result<()> {
                 });
                 let _ = handle.join();
             }
+            _ => {}
         });
     Ok(())
 }

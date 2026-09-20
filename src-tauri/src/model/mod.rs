@@ -141,6 +141,31 @@ pub enum Theme {
     Dark,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    #[default]
+    MinimizeToTray,
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
+pub struct SystemSettings {
+    #[serde(default)]
+    pub auto_start: bool,
+    #[serde(default)]
+    pub close_behavior: CloseBehavior,
+}
+
+impl Default for SystemSettings {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            close_behavior: CloseBehavior::Quit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmApiKeyEntry {
     pub name: String,

@@ -230,6 +230,23 @@ impl App {
         }
     }
 
+    pub fn read_system_settings() -> Result<SystemSettings> {
+        let settings_path = Path::new(&App::config_dir()?).join("system_settings.json");
+        match fs::read(settings_path) {
+            Ok(content) => Ok(utils::json::parse_json(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SystemSettings::default())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_system_settings(settings: &SystemSettings) -> Result<()> {
+        let settings_path = Path::new(&App::config_dir()?).join("system_settings.json");
+        fs::write(settings_path, serde_json::to_vec(settings)?)?;
+        Ok(())
+    }
+
     fn save_account_info(account: &AccountInfo) -> Result<()> {
         let config_dir = App::config_dir()?;
         let account_path = format!("{}/{}", config_dir, "account.json");
