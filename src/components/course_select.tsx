@@ -18,11 +18,15 @@ export default function CourseSelect({
   disabled,
   onChange,
   value,
+  getSourceLabel,
+  compareCourses,
 }: {
   courses: Course[];
   disabled?: boolean;
   onChange?: (courseId: number) => void;
   value?: number;
+  getSourceLabel?: (course: Course) => string | undefined;
+  compareCourses?: (a: Course, b: Course) => number;
 }) {
   const formatCourseName = (course: Course): string => {
     const term = course.term.name.replace("Spring", "春").replace("Fall", "秋");
@@ -38,12 +42,12 @@ export default function CourseSelect({
 
   const formattedCourses = useMemo(() => {
     return [...courses]
+      .sort(compareCourses ?? ((a, b) => b.term.id - a.term.id))
       .map((course) => ({
         ...course,
-        name: formatCourseName(course),
-      }))
-      .sort((a, b) => b.term.id - a.term.id);
-  }, [courses]);
+        name: [formatCourseName(course), getSourceLabel?.(course)].filter(Boolean).join(" | "),
+      }));
+  }, [courses, getSourceLabel, compareCourses]);
 
   const selectedCourse =
     formattedCourses.find((course) => course.id === value) ?? null;
@@ -112,6 +116,7 @@ export default function CourseSelect({
                   {option.name.split(" | ")[0]}
                 </Typography>
                 {isTA ? <Chip size="small" color="error" label="助教" /> : null}
+                {getSourceLabel?.(option) ? <Chip size="small" color="primary" variant="outlined" label={getSourceLabel(option)} /> : null}
               </Box>
               <Box
                 sx={{

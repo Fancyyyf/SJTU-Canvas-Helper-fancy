@@ -3,16 +3,15 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use error::{AppError, Result};
 use model::{
     Account, AccountInfo, AnnualReport, AppConfig, Assignment, CalendarEvent, CanvasVideo, Colors,
     Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
     FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel, ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, User,
-    UserSubmissions,
-    VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
+    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission, User, UserSubmissions,
+    VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
 };
+use serde::{Deserialize, Serialize};
 
 use dirs::config_dir;
 
@@ -813,13 +812,29 @@ async fn login_video_website() -> Result<()> {
 }
 
 #[tauri::command]
-async fn get_subjects() -> Result<Vec<Subject>> {
-    APP.get_subjects().await
+async fn get_canvas_videos(course_id: i64) -> Result<Vec<CanvasVideo>> {
+    APP.get_canvas_videos(course_id).await
 }
 
 #[tauri::command]
-async fn get_canvas_videos(course_id: i64) -> Result<Vec<CanvasVideo>> {
-    APP.get_canvas_videos(course_id).await
+async fn list_video_space_courses() -> Result<Vec<Course>> {
+    APP.list_video_space_courses().await
+}
+
+#[tauri::command]
+async fn get_video_space_videos(teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
+    APP.get_video_space_videos(teaching_class_id).await
+}
+
+#[tauri::command]
+async fn get_legacy_videos(
+    course_id: i64,
+    course_name: String,
+    term_name: String,
+    teacher_names: Vec<String>,
+) -> Result<Vec<CanvasVideo>> {
+    APP.get_legacy_videos(course_id, &course_name, &term_name, &teacher_names)
+        .await
 }
 
 #[tauri::command]
@@ -845,6 +860,11 @@ async fn get_video_info(video_id: i64) -> Result<VideoInfo> {
 #[tauri::command]
 async fn get_canvas_video_info(video_id: String) -> Result<VideoInfo> {
     APP.get_canvas_video_info(&video_id).await
+}
+
+#[tauri::command]
+async fn get_video_play_info(source: VideoSource, video_id: String) -> Result<VideoInfo> {
+    APP.get_video_play_info(source, &video_id).await
 }
 
 #[tauri::command]
@@ -1056,13 +1076,16 @@ async fn main() -> Result<()> {
             // Apis for course video
             get_uuid,
             express_login,
-            get_subjects,
             get_canvas_videos,
+            list_video_space_courses,
+            get_video_space_videos,
+            get_legacy_videos,
             login_canvas_website,
             check_extra_login_status,
             get_video_course,
             get_video_info,
             get_canvas_video_info,
+            get_video_play_info,
             download_video,
             login_video_website,
             prepare_proxy,

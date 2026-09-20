@@ -20,17 +20,19 @@ use crate::{
     },
     error::{AppError, Result},
     model::{
-        CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody,
-        ItemPage, ProgressPayload, Subject, VideoCourse, VideoInfo, VideoPlayInfo,
+        CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody, Course,
+        ItemPage, ProgressPayload, Teacher, Term, VideoCourse, VideoInfo, VideoPlayInfo,
+        VideoSource,
     },
     utils::{self, file::get_file_name, file::write_file_at_offset, time::format_time},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{Local, TimeZone};
 use md5::{Digest, Md5};
 use printpdf::*;
 use regex::Regex;
 use reqwest::{
-    cookie::CookieStore,
+    cookie::{CookieStore, Jar},
     header::{
         HeaderMap, HeaderValue, ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE,
         REFERER,
@@ -39,13 +41,230 @@ use reqwest::{
     Response, StatusCode,
 };
 use select::{document::Document, node::Node, predicate::Name};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tauri::Url;
 use tokio::{sync::Mutex, task::JoinSet};
 
 const RESOURCE_MANAGE_BASE_URL: &str = "https://v.sjtu.edu.cn/jy-application-resourcemanage";
 const RESOURCE_MANAGE_UI_URL: &str = "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/";
+const VIDEO_SPACE_LAUNCH_URL: &str =
+    "https://oc.sjtu.edu.cn/accounts/1/external_tools/3136?launch_type=global_navigation";
+const CANVAS_VIDEO_TOOL_ID: i64 = 8329;
+const LEGACY_VIDEO_LIST_URL: &str = "https://courses.sjtu.edu.cn/lti/vodVideo/findVodVideoList";
+const LEGACY_VIDEO_INFO_URL: &str = "https://courses.sjtu.edu.cn/lti/vodVideo/getVodVideoInfos";
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCanvasVideoResponse {
+    body: Option<LegacyCanvasVideoResponseBody>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCanvasVideoResponseBody {
+    #[serde(default)]
+    list: Vec<LegacyCanvasVideo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyVideoInfoResponse {
+    code: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    desc: String,
+    body: Option<VideoInfo>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCanvasVideo {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    video_id: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    user_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    video_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    classroom_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    course_begin_time: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    course_end_time: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySubject {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    subject_id: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    subject_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    tecl_id: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    user_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    begin_year: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    end_year: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    term_time: i64,
+}
+
+impl From<LegacyCanvasVideo> for CanvasVideo {
+    fn from(video: LegacyCanvasVideo) -> Self {
+        Self {
+            source: VideoSource::Legacy,
+            video_id: video.video_id,
+            user_name: video.user_name,
+            video_name: video.video_name,
+            classroom_name: video.classroom_name,
+            course_begin_time: video.course_begin_time,
+            course_end_time: video.course_end_time,
+            playable: true,
+            ..Default::default()
+        }
+    }
+}
+
+fn normalize_legacy_match(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn raw_query_parameter(url: &Url, name: &str) -> Option<String> {
+    url.query()?.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
+}
+
+fn external_tool_urls_from_tabs(value: &Value, base_url: &Url) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|tab| {
+            tab.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("context_external_tool_"))
+        })
+        .filter_map(|tab| tab.get("html_url").and_then(Value::as_str))
+        .filter_map(|url| base_url.join(url).ok())
+        .map(|url| url.to_string())
+        .collect()
+}
+
+fn legacy_subject_matches_term(subject: &LegacySubject, term_name: &str) -> bool {
+    let normalized = normalize_legacy_match(term_name);
+    let years_match = normalized.contains(&subject.begin_year.to_string())
+        && normalized.contains(&subject.end_year.to_string());
+    if !years_match {
+        return false;
+    }
+    let semester = match subject.term_time {
+        1 => ["-1", "第一学期", "秋", "fall"].as_slice(),
+        2 => ["-2", "第二学期", "春", "spring"].as_slice(),
+        3 => ["-3", "第三学期", "夏", "summer"].as_slice(),
+        _ => return true,
+    };
+    semester.iter().any(|marker| normalized.contains(marker))
+}
+
+fn legacy_video_time(timestamp: i64) -> String {
+    let datetime = if timestamp.abs() >= 10_000_000_000 {
+        Local.timestamp_millis_opt(timestamp).single()
+    } else {
+        Local.timestamp_opt(timestamp, 0).single()
+    };
+    datetime
+        .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_default()
+}
+
+fn legacy_videos_from_course(course: VideoCourse) -> Vec<CanvasVideo> {
+    let course_name = course.subj_name;
+    course
+        .response_vo_list
+        .into_iter()
+        .filter(|video| video.id > 0)
+        .map(|video| CanvasVideo {
+            source: VideoSource::Legacy,
+            video_id: video.id.to_string(),
+            user_name: video.user_name,
+            video_name: if video.vide_name.is_empty() {
+                course_name.clone()
+            } else {
+                video.vide_name
+            },
+            course_begin_time: legacy_video_time(video.cour_begin_time),
+            course_end_time: legacy_video_time(video.cour_end_time),
+            playable: true,
+            availability: "ready".to_string(),
+            availability_label: "可播放".to_string(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+// These IDs belong to the video service, not Canvas. Keep this list separate.
+fn video_space_courses_from_response(value: &Value) -> Result<Vec<Course>> {
+    let records = api_data(value)?
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::VideoDownloadError("Video course list is missing records".into())
+        })?;
+    records
+        .iter()
+        .map(|record| {
+            let id = value_as_i64(record.get("teclId"))
+                .filter(|id| *id > 0)
+                .ok_or_else(|| {
+                    AppError::VideoDownloadError("Video course is missing teaching class id".into())
+                })?;
+            Ok(Course {
+                id,
+                name: first_string(record, &["subjName", "teclName"]),
+                course_code: first_string(record, &["courseNo", "teclCode"]),
+                teachers: record
+                    .get("teacNames")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|name| Teacher {
+                        display_name: name.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                term: Term {
+                    id: value_as_i64(record.get("acteId")).unwrap_or_default(),
+                    name: format!(
+                        "{}-{} 第{}学期",
+                        first_string(record, &["acyeBeginYear"]),
+                        first_string(record, &["acyeEndYear"]),
+                        first_string(record, &["acteName"])
+                    ),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        })
+        .collect()
+}
 
 fn value_as_i64(value: Option<&Value>) -> Option<i64> {
     value.and_then(|value| {
@@ -138,7 +357,7 @@ fn api_data(value: &Value) -> Result<&Value> {
         .ok_or_else(|| AppError::VideoDownloadError("Video service returned no data".to_string()))
 }
 
-fn canvas_videos_from_response(value: &Value) -> Result<Vec<CanvasVideo>> {
+fn canvas_videos_from_response(value: &Value, source: VideoSource) -> Result<Vec<CanvasVideo>> {
     let records = api_data(value)?
         .get("records")
         .and_then(Value::as_array)
@@ -177,6 +396,7 @@ fn canvas_videos_from_response(value: &Value) -> Result<Vec<CanvasVideo>> {
             };
             let (playable, availability, availability_label) = canvas_video_availability(record);
             Some(CanvasVideo {
+                source,
                 video_id,
                 user_name: first_string(record, &["tecName", "userName", "teacherName"]),
                 video_name,
@@ -397,16 +617,28 @@ impl Client {
     }
 
     pub async fn login_video_website(&self, cookie: &str) -> Result<Option<String>> {
-        self.attach_ja_auth_cookie(cookie);
-        let response = self.get_request(VIDEO_LOGIN_URL, None::<&str>).await?;
+        // Keep the legacy OAuth flow isolated from Canvas LTI launches. Both
+        // services use jAccount, but mixing their transient cookies in the
+        // shared jar can make the legacy endpoint redirect back to itself.
+        let login_jar = Arc::new(Jar::default());
+        for url in [AUTH_URL, MY_SJTU_URL] {
+            login_jar.add_cookie_str(cookie, &Url::parse(url).unwrap());
+        }
+        let login_client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(Policy::limited(32))
+            .cookie_provider(login_jar.clone())
+            .build()?;
+        let response = login_client.get(VIDEO_LOGIN_URL).send().await?;
         let url = response.url();
         if let Some(domain) = url.domain() {
             if domain == "jaccount.sjtu.edu.cn" {
                 return Err(AppError::LoginError);
             }
         }
-        if let Some(cookies) = self.jar.cookies(&Url::parse(VIDEO_BASE_URL).unwrap()) {
+        if let Some(cookies) = login_jar.cookies(&Url::parse(VIDEO_BASE_URL).unwrap()) {
             if let Ok(cookies) = cookies.to_str() {
+                self.init_cookie(cookies);
                 return Ok(Some(cookies.to_owned()));
             }
         }
@@ -467,9 +699,98 @@ impl Client {
         Ok(all_items)
     }
 
-    pub async fn get_subjects(&self) -> Result<Vec<Subject>> {
-        let url = format!("{VIDEO_BASE_URL}/system/course/subject/findSubjectVodList?");
-        self.get_page_items(&url).await
+    async fn get_video_space_token(&self) -> Result<String> {
+        self.get_video_space_token_from_url(VIDEO_SPACE_LAUNCH_URL)
+            .await
+    }
+
+    async fn get_video_space_token_from_url(&self, launch_url: &str) -> Result<String> {
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .cookie_provider(self.jar.clone())
+            .build()?;
+        let mut request = client.get(launch_url);
+        for _ in 0..16 {
+            let response = request.send().await?.error_for_status()?;
+            let base = response.url().clone();
+            if base.domain() == Some("jaccount.sjtu.edu.cn") {
+                return Err(AppError::LoginError);
+            }
+            if let Some(location) = response.headers().get("location") {
+                let next = base
+                    .join(location.to_str()?)
+                    .map_err(|_| AppError::LoginError)?;
+                if let Some(token) = jwt_token_from_location(next.as_str()) {
+                    return Ok(token);
+                }
+                request = client.get(next);
+                continue;
+            }
+            let body = response.text().await?;
+            let document = Document::from(body.as_str());
+            let embedded_token = document
+                .find(Name("iframe"))
+                .filter_map(|node| node.attr("src"))
+                .find_map(jwt_token_from_location);
+            if let Some(token) = embedded_token {
+                return Ok(token);
+            }
+            let (action, data) = self.get_form_submission_from_doc(document)?;
+            request = client
+                .post(self.resolve_form_action(&base, &action)?)
+                .form(&data);
+        }
+        Err(AppError::VideoDownloadError(
+            "Video space login did not finish".into(),
+        ))
+    }
+
+    pub async fn list_video_space_courses(&self) -> Result<Vec<Course>> {
+        let token = self.get_video_space_token().await?;
+        let mut courses = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in 1..=1000 {
+            let response = self
+                .cli
+                .get(format!(
+                    "{RESOURCE_MANAGE_BASE_URL}/v1/group_subject_vod_list/t-1"
+                ))
+                .header("jwt-token", &token)
+                .header(REFERER, RESOURCE_MANAGE_UI_URL)
+                .query(&[
+                    ("page.pageIndex", page.to_string()),
+                    ("page.pageSize", "100".into()),
+                    ("page.orders[0].asc", "false".into()),
+                    ("page.orders[0].field", "updateTime".into()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?;
+            let value: Value = response.json().await?;
+            let batch = video_space_courses_from_response(&value)?;
+            let empty = batch.is_empty();
+            let previous_len = courses.len();
+            courses.extend(batch.into_iter().filter(|course| seen.insert(course.id)));
+            let total = value_as_i64(api_data(&value)?.get("rowCount"));
+            if empty || total.is_some_and(|total| courses.len() as i64 >= total) {
+                return Ok(courses);
+            }
+            if previous_len == courses.len() {
+                return Err(AppError::VideoDownloadError(
+                    "Video course pagination made no progress".into(),
+                ));
+            }
+        }
+        Err(AppError::VideoDownloadError(
+            "Video course pagination limit reached".into(),
+        ))
+    }
+
+    pub async fn get_video_space_videos(&self, teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
+        let token = self.get_video_space_token().await?;
+        *self.token.write().await = token.clone();
+        self.get_videos_for_teaching_class(teaching_class_id, token, VideoSource::VideoSpace)
+            .await
     }
 
     fn get_form_submission_from_doc(
@@ -507,9 +828,17 @@ impl Client {
     async fn get_launch_form_for_canvas_course_id(
         &self,
         course_id: i64,
+        tool_id: i64,
     ) -> Result<(String, HashMap<String, String>)> {
-        let url = format!("https://oc.sjtu.edu.cn/courses/{course_id}/external_tools/8329",);
-        let response = self.cli.get(&url).send().await?.error_for_status()?;
+        let url = format!("https://oc.sjtu.edu.cn/courses/{course_id}/external_tools/{tool_id}");
+        self.get_launch_form_from_url(&url).await
+    }
+
+    async fn get_launch_form_from_url(
+        &self,
+        url: &str,
+    ) -> Result<(String, HashMap<String, String>)> {
+        let response = self.cli.get(url).send().await?.error_for_status()?;
         let response_url = response.url().clone();
         let body = response.text().await?;
         let document = Document::from(body.as_str());
@@ -517,8 +846,24 @@ impl Client {
         Ok((self.resolve_form_action(&response_url, &action)?, data))
     }
 
+    async fn get_course_external_tool_urls(&self, course_id: i64) -> Result<Vec<String>> {
+        let base_url = Url::parse(self.base_url.read().await.trim_end_matches('/')).map_err(|error| {
+            AppError::VideoDownloadError(format!("Invalid Canvas base URL: {error}"))
+        })?;
+        let url = base_url
+            .join(&format!("/api/v1/courses/{course_id}/tabs"))
+            .map_err(|error| {
+                AppError::VideoDownloadError(format!("Invalid Canvas tabs URL: {error}"))
+            })?;
+        let response = self.cli.get(url).send().await?.error_for_status()?;
+        let value: Value = serde_json::from_slice(&response.bytes().await?)?;
+        Ok(external_tool_urls_from_tabs(&value, &base_url))
+    }
+
     async fn get_video_launch_token(&self, course_id: i64) -> Result<String> {
-        let (action, data) = self.get_launch_form_for_canvas_course_id(course_id).await?;
+        let (action, data) = self
+            .get_launch_form_for_canvas_course_id(course_id, CANVAS_VIDEO_TOOL_ID)
+            .await?;
         let resp = self
             .cli
             .post(action)
@@ -580,6 +925,176 @@ impl Client {
     pub async fn get_canvas_videos(&self, course_id: i64) -> Result<Vec<CanvasVideo>> {
         let (teaching_class_id, token) = self.get_teaching_class_id_token(course_id).await?;
         *self.token.write().await = token.to_owned();
+        self.get_videos_for_teaching_class(teaching_class_id, token, VideoSource::Canvas)
+            .await
+    }
+
+    async fn get_legacy_canvas_course_id(&self, course_id: i64) -> Result<Option<String>> {
+        let tool_urls = self.get_course_external_tool_urls(course_id).await?;
+        let client = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .cookie_provider(self.jar.clone())
+            .build()?;
+        for tool_url in tool_urls {
+            let Ok((action, data)) = self.get_launch_form_from_url(&tool_url).await else {
+                continue;
+            };
+            let Ok(response) = client.post(&action).form(&data).send().await else {
+                continue;
+            };
+            if !response.status().is_redirection() {
+                continue;
+            }
+            let Some(location) = response.headers().get("location") else {
+                continue;
+            };
+            let Ok(location) = location.to_str() else {
+                continue;
+            };
+            let Ok(action_url) = Url::parse(&action) else {
+                continue;
+            };
+            let Ok(location) = action_url.join(location) else {
+                continue;
+            };
+            if location.host_str() != Some("courses.sjtu.edu.cn") {
+                continue;
+            }
+            // The legacy page embeds the still-percent-encoded token directly in
+            // JavaScript and posts that value. Decoding it here changes the token
+            // and makes findVodVideoList return an empty list.
+            if let Some(canvas_course_id) = raw_query_parameter(&location, "canvasCourseId") {
+                return Ok(Some(canvas_course_id));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn get_legacy_videos_from_lti(&self, course_id: i64) -> Result<Vec<CanvasVideo>> {
+        let Some(canvas_course_id) = self.get_legacy_canvas_course_id(course_id).await? else {
+            return Ok(Vec::new());
+        };
+        let response = self
+            .cli
+            .post(LEGACY_VIDEO_LIST_URL)
+            .form(&[
+                ("pageIndex", "1"),
+                ("pageSize", "1000"),
+                ("canvasCourseId", canvas_course_id.as_str()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+        let response: LegacyCanvasVideoResponse =
+            crate::utils::json::parse_json(&response.bytes().await?)?;
+        Ok(response
+            .body
+            .map(|body| body.list.into_iter().map(CanvasVideo::from).collect())
+            .unwrap_or_default())
+    }
+
+    async fn find_legacy_subjects(&self, course_name: &str) -> Result<Vec<LegacySubject>> {
+        let response = self
+            .cli
+            .post(format!(
+                "{VIDEO_BASE_URL}/system/course/subject/findSubjectVodList"
+            ))
+            .form(&[
+                ("termTimeId", ""),
+                ("firstFromCache", "true"),
+                ("subjectName", course_name),
+                ("orderByType", "1"),
+                ("clroType", ""),
+                ("pageIndex", "1"),
+                ("pageSize", "100"),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+        let page: ItemPage<LegacySubject> =
+            crate::utils::json::parse_json(&response.bytes().await?)?;
+        Ok(page.list)
+    }
+
+    pub async fn get_legacy_videos(
+        &self,
+        course_id: i64,
+        course_name: &str,
+        term_name: &str,
+        teacher_names: &[String],
+    ) -> Result<Vec<CanvasVideo>> {
+        let videos = self.get_legacy_videos_from_lti(course_id).await?;
+        if !videos.is_empty() || course_name.trim().is_empty() {
+            return Ok(videos);
+        }
+
+        let normalized_name = normalize_legacy_match(course_name);
+        let normalized_teachers: Vec<String> = teacher_names
+            .iter()
+            .map(|teacher| normalize_legacy_match(teacher))
+            .filter(|teacher| !teacher.is_empty())
+            .collect();
+        let subjects = self.find_legacy_subjects(course_name).await?;
+        let mut candidates: Vec<LegacySubject> = subjects
+            .into_iter()
+            .filter(|subject| subject.subject_id > 0 && subject.tecl_id > 0)
+            .filter(|subject| normalize_legacy_match(&subject.subject_name) == normalized_name)
+            .collect();
+        if candidates
+            .iter()
+            .any(|subject| legacy_subject_matches_term(subject, term_name))
+        {
+            candidates.retain(|subject| legacy_subject_matches_term(subject, term_name));
+        }
+        if !normalized_teachers.is_empty() {
+            let teacher_matches = |subject: &LegacySubject| {
+                normalized_teachers.contains(&normalize_legacy_match(&subject.user_name))
+            };
+            if candidates.iter().any(teacher_matches) {
+                candidates.retain(teacher_matches);
+            }
+        }
+
+        let mut videos = Vec::new();
+        for subject in candidates {
+            if let Some(course) = self
+                .get_video_course(subject.subject_id, subject.tecl_id)
+                .await?
+            {
+                videos.extend(legacy_videos_from_course(course));
+            }
+        }
+        Ok(videos)
+    }
+
+    pub async fn get_legacy_video_info(&self, video_id: &str) -> Result<VideoInfo> {
+        let response = self
+            .cli
+            .post(LEGACY_VIDEO_INFO_URL)
+            .form(&[
+                ("playTypeHls", "true"),
+                ("id", video_id),
+                ("isAudit", "true"),
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+        let response: LegacyVideoInfoResponse =
+            crate::utils::json::parse_json(&response.bytes().await?)?;
+        if response.code != 200 {
+            return Err(AppError::VideoDownloadError(response.desc));
+        }
+        response.body.ok_or_else(|| {
+            AppError::VideoDownloadError("Legacy video service returned no data".to_string())
+        })
+    }
+
+    async fn get_videos_for_teaching_class(
+        &self,
+        teaching_class_id: i64,
+        token: String,
+        source: VideoSource,
+    ) -> Result<Vec<CanvasVideo>> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/subject_vod_list_new");
         let resp = self
             .cli
@@ -598,7 +1113,7 @@ impl Client {
             .await?
             .error_for_status()?;
         let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
-        canvas_videos_from_response(&value)
+        canvas_videos_from_response(&value, source)
     }
 
     pub async fn get_oauth_consumer_key(&self) -> Result<Option<String>> {
@@ -628,7 +1143,7 @@ impl Client {
             "{VIDEO_BASE_URL}/system/resource/vodVideo/getCourseListBySubject?orderField=courTimes&subjectId={subject_id}&teclId={tecl_id}&",
         );
         let mut courses = self.get_page_items(&url).await?;
-        Ok(courses.remove(0))
+        Ok((!courses.is_empty()).then(|| courses.remove(0)))
     }
 
     fn get_oauth_signature(
@@ -976,6 +1491,119 @@ mod tests {
     use super::*;
     use crate::client::constants::BASE_URL;
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
+
+    #[test]
+    fn test_video_space_courses_use_teaching_class_ids() {
+        let courses = video_space_courses_from_response(&serde_json::json!({
+            "status": 200, "data": { "rowCount": 2, "records": [
+                {"id": 7, "teclId": "910", "subjName": "测试课程甲",
+                 "teacNames": ["测试教师甲"], "acyeBeginYear": 2098, "acyeEndYear": 2099,
+                 "acteName": "一", "acteId": 42},
+                {"teclId": 911, "subjName": "测试课程乙"}
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(courses.len(), 2);
+        assert_eq!(courses[0].id, 910);
+        assert_eq!(courses[0].teachers[0].display_name, "测试教师甲");
+        assert_eq!(courses[0].term.name, "2098-2099 第一学期");
+        assert_eq!(courses[1].name, "测试课程乙");
+        assert!(video_space_courses_from_response(&serde_json::json!({
+            "data": {"records": [{"id": 7}]}
+        }))
+        .is_err());
+        assert!(video_space_courses_from_response(&serde_json::json!({
+            "status": 401, "message": "expired"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn test_legacy_subject_term_matching() {
+        let subject = LegacySubject {
+            subject_id: 1,
+            subject_name: "测试课程".to_string(),
+            tecl_id: 2,
+            user_name: "测试教师".to_string(),
+            begin_year: 2098,
+            end_year: 2099,
+            term_time: 1,
+        };
+        assert!(legacy_subject_matches_term(&subject, "2098-2099 Fall"));
+        assert!(legacy_subject_matches_term(&subject, "2098-2099 秋"));
+        assert!(!legacy_subject_matches_term(&subject, "2098-2099 Spring"));
+    }
+
+    #[test]
+    fn test_legacy_subject_accepts_null_fields() {
+        let subject: LegacySubject = crate::utils::json::parse_json(
+            r#"{"subjectId":1,"subjectName":"测试课程","teclId":2,"userName":null,"beginYear":2098,"endYear":2099,"termTime":1}"#.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(subject.user_name, "");
+    }
+
+    #[test]
+    fn test_legacy_canvas_course_id_keeps_percent_encoding() {
+        let url = Url::parse(
+            "https://courses.sjtu.edu.cn/lti/app?canvasCourseId=abc%2Fdef%2Bghi",
+        )
+        .unwrap();
+        assert_eq!(
+            raw_query_parameter(&url, "canvasCourseId").as_deref(),
+            Some("abc%2Fdef%2Bghi")
+        );
+    }
+
+    #[test]
+    fn test_external_tool_urls_from_tabs_uses_only_tool_tabs() {
+        let base_url = Url::parse("https://canvas.example/").unwrap();
+        let tabs = serde_json::json!([
+            {
+                "id": "context_external_tool_400001",
+                "html_url": "/courses/42/external_tools/400001"
+            },
+            {
+                "id": "context_external_tool_400002",
+                "html_url": "https://canvas.example/courses/42/external_tools/400002"
+            },
+            {"id": "modules", "html_url": "/courses/42/modules"}
+        ]);
+        assert_eq!(
+            external_tool_urls_from_tabs(&tabs, &base_url),
+            vec![
+                "https://canvas.example/courses/42/external_tools/400001".to_string(),
+                "https://canvas.example/courses/42/external_tools/400002".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_video_space_login_forms_and_redirect() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let launch = server.mock(|when, then| {
+            when.method(GET).path("/launch");
+            then.status(200).body(
+                r#"<form action="/sso" method="post"><input name="launch" value="test"></form>"#,
+            );
+        });
+        let sso = server.mock(|when, then| {
+            when.method(POST).path("/sso").body("launch=test");
+            then.status(302)
+                .header("Location", "/ui/#/?jwt_token=test%2Btoken");
+        });
+        let client = Client::new_without_proxy(server.base_url().as_str(), "", "", "", None);
+        assert_eq!(
+            client
+                .get_video_space_token_from_url(&server.url("/launch"))
+                .await
+                .unwrap(),
+            "test+token"
+        );
+        launch.assert();
+        sso.assert();
+    }
 
     #[tokio::test]
     async fn test_get_uuid() -> Result<()> {
