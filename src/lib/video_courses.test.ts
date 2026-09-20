@@ -49,7 +49,22 @@ describe("video course fallback", () => {
     source: CanvasVideo["source"],
     videoId: string,
     courseBeginTime = "",
-  ) => ({ source, videoId, courseBeginTime }) as CanvasVideo;
+  ): CanvasVideo => ({
+    source,
+    videoId,
+    userName: "",
+    videoName: "",
+    classroomName: "",
+    courseBeginTime,
+    courseEndTime: "",
+    weekNumber: 0,
+    weekDay: 0,
+    lessonNumber: 0,
+    dailyLessonNumber: 0,
+    playable: true,
+    availability: "ready",
+    availabilityLabel: "可播放",
+  });
   it("combines all video sources for a Canvas course", async () => {
     const canvas = vi.fn().mockResolvedValue([video("canvas", "new")]);
     const space = vi.fn().mockResolvedValue([video("videoSpace", "space")]);

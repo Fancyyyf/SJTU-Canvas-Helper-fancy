@@ -4,7 +4,7 @@ use std::process;
 use dirs::config_dir;
 use error::{AppError, Result};
 use futures::StreamExt;
-use reqwest::StatusCode;
+use reqwest::{header::TE, StatusCode};
 use rust_xlsxwriter::Workbook;
 use std::convert::Infallible;
 use std::{
@@ -79,17 +79,18 @@ async fn proxy_video_request(
             let status = response.status();
             let mut builder = Response::builder().status(status);
             for (key, value) in response.headers() {
-                if !matches!(
-                    key.as_str(),
-                    "connection"
-                        | "keep-alive"
-                        | "proxy-authenticate"
-                        | "proxy-authorization"
-                        | "te"
-                        | "trailer"
-                        | "transfer-encoding"
-                        | "upgrade"
-                ) {
+                if key.as_str() != TE.as_str()
+                    && !matches!(
+                        key.as_str(),
+                        "connection"
+                            | "keep-alive"
+                            | "proxy-authenticate"
+                            | "proxy-authorization"
+                            | "trailer"
+                            | "transfer-encoding"
+                            | "upgrade"
+                    )
+                {
                     builder = builder.header(key, value);
                 }
             }
