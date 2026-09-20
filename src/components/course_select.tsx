@@ -22,6 +22,7 @@ export default function CourseSelect({
   value,
   getSourceLabel,
   compareCourses,
+  includeAllOption = false,
 }: {
   courses: Course[];
   disabled?: boolean;
@@ -29,6 +30,7 @@ export default function CourseSelect({
   value?: number;
   getSourceLabel?: (course: Course) => string | undefined;
   compareCourses?: (a: Course, b: Course) => number;
+  includeAllOption?: boolean;
 }) {
   const formatCourseName = (course: Course): string => {
     if (course.id === ALL_COURSES_ID) return "全部课程（当前学期范围）";
@@ -44,13 +46,33 @@ export default function CourseSelect({
   };
 
   const formattedCourses = useMemo(() => {
-    return [...courses]
+    const formatted = [...courses]
       .sort(compareCourses ?? ((a, b) => b.term.id - a.term.id))
       .map((course) => ({
         ...course,
         name: [formatCourseName(course), getSourceLabel?.(course)].filter(Boolean).join(" | "),
       }));
-  }, [courses, getSourceLabel, compareCourses]);
+    if (includeAllOption && courses.length > 0) {
+      formatted.unshift({
+        id: ALL_COURSES_ID,
+        uuid: "all-courses",
+        name: "全部课程（当前学期范围）",
+        course_code: "",
+        enrollments: [],
+        access_restricted_by_date: false,
+        teachers: [],
+        term: {
+          id: -1,
+          name: "全部学期",
+          start_at: null,
+          end_at: null,
+          created_at: null,
+          workflow_state: "available",
+        },
+      });
+    }
+    return formatted;
+  }, [courses, getSourceLabel, compareCourses, includeAllOption]);
 
   const selectedCourse =
     formattedCourses.find((course) => course.id === value) ?? null;

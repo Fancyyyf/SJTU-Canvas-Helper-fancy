@@ -1,17 +1,14 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
-
-use error::{AppError, Result};
-use model::{
-    Account, AccountInfo, AnnualReport, AppConfig, Assignment, CalendarEvent, CanvasVideo, Colors,
-    Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
-    FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel, ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission, User, UserSubmissions,
-    VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
+use std::{
+    fs, io,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
-use serde::{Deserialize, Serialize};
 
 use error::{AppError, Result};
 use model::{
@@ -20,8 +17,8 @@ use model::{
     Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
     FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LiveInfo, LogLevel,
     ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Subject, Submission, SystemSettings,
-    User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo,
+    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission, SystemSettings,
+    User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -988,13 +985,13 @@ async fn get_canvas_video_info(video_id: String) -> Result<VideoInfo> {
 }
 
 #[tauri::command]
-async fn get_video_play_info(source: VideoSource, video_id: String) -> Result<VideoInfo> {
-    APP.get_video_play_info(source, &video_id).await
+async fn get_canvas_live_info(course_id: i64) -> Result<LiveInfo> {
+    APP.get_canvas_live_info(course_id).await
 }
 
 #[tauri::command]
-async fn prepare_proxy() -> Result<bool> {
-    APP.prepare_proxy().await
+async fn get_video_play_info(source: VideoSource, video_id: String) -> Result<VideoInfo> {
+    APP.get_video_play_info(source, &video_id).await
 }
 
 #[tauri::command]
@@ -1290,6 +1287,7 @@ async fn main() -> Result<()> {
             get_video_course,
             get_video_info,
             get_canvas_video_info,
+            get_canvas_live_info,
             get_video_play_info,
             download_video,
             login_video_website,

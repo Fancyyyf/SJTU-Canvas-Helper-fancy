@@ -89,6 +89,72 @@ function isVideoUnavailableError(error: unknown): boolean {
   return String(error).includes("No playable video source");
 }
 
+function createPlaybackTraceId(): string {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function describePlaybackUrl(value: string): Record<string, unknown> {
+  try {
+    const url = new URL(value);
+    const pathSegments = url.pathname.split("/").filter(Boolean);
+    const lastSegment = pathSegments[pathSegments.length - 1] ?? "";
+    const extensionSegments = lastSegment.split(".");
+    return {
+      valid: true,
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port || "<default>",
+      pathSegments: pathSegments.length,
+      extension: lastSegment.includes(".")
+        ? extensionSegments[extensionSegments.length - 1]?.toLowerCase()
+        : "<none>",
+      queryParameterNames: [...new Set(url.searchParams.keys())].sort(),
+    };
+  } catch {
+    return { valid: false, present: Boolean(value) };
+  }
+}
+
+function describeMediaState(player: HTMLMediaElement | null): Record<string, unknown> {
+  if (!player) return { present: false };
+  const buffered = Array.from({ length: player.buffered.length }, (_, index) => ({
+    start: player.buffered.start(index),
+    end: player.buffered.end(index),
+  }));
+  return {
+    present: true,
+    readyState: player.readyState,
+    networkState: player.networkState,
+    paused: player.paused,
+    ended: player.ended,
+    currentTime: player.currentTime,
+    duration: Number.isFinite(player.duration) ? player.duration : null,
+    buffered,
+    videoWidth: player instanceof HTMLVideoElement ? player.videoWidth : undefined,
+    videoHeight: player instanceof HTMLVideoElement ? player.videoHeight : undefined,
+  };
+}
+
+function logPlayback(
+  traceId: string,
+  phase: string,
+  details: Record<string, unknown> = {},
+  error = false
+) {
+  logDiagnostic({
+    level: error ? LOG_LEVEL_ERROR : LOG_LEVEL_INFO,
+    code: `VIDEO.${phase.replace(/\./g, "_").toUpperCase()}`,
+    scope: "video.playback",
+    action: phase,
+    outcome: error ? "failed" : phase.endsWith("begin") ? "started" : "success",
+    recoverable: true,
+    traceId,
+    context: details,
+  });
+}
+
 function videoSourceLabel(source: CanvasVideo["source"]): string {
   return {
     canvas: "Canvas",

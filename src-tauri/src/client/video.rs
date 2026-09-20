@@ -22,7 +22,8 @@ use crate::{
     error::{AppError, Result},
     model::{
         CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody, Course,
-        ItemPage, ProgressPayload, Teacher, Term, VideoCourse, VideoInfo, VideoPlayInfo,
+        ItemPage, LiveChannel, LiveInfo, ProgressPayload, Teacher, Term, VideoCourse, VideoInfo,
+        VideoPlayInfo,
         VideoSource,
     },
     utils::{self, file::get_file_name, file::write_file_at_offset, time::format_time},

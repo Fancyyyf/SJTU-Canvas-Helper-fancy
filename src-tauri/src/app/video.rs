@@ -4,7 +4,7 @@ use super::App;
 use crate::{
     error::{AppError, Result},
     model::{
-        CanvasVideo, Course, ProgressPayload, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
+        CanvasVideo, Course, LiveInfo, ProgressPayload, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
     },
 };
 // Apis for course video

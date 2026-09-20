@@ -506,6 +506,8 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|trace_id, tail, query, headers| {
                 proxy_video_request(
+                    trace_id,
+                    "canvas-media",
                     "https://videos.sjtu.edu.cn/vod",
                     "https://v.sjtu.edu.cn/",
                     "https://v.sjtu.edu.cn",
@@ -520,6 +522,8 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|tail, query, headers| {
                 proxy_video_request(
+                    "unscoped".to_string(),
+                    "legacy-vod",
                     "https://videos.sjtu.edu.cn/vod",
                     "https://courses.sjtu.edu.cn/",
                     "https://courses.sjtu.edu.cn",
@@ -534,6 +538,8 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|tail, query, headers| {
                 proxy_video_request(
+                    "unscoped".to_string(),
+                    "canvas-live",
                     "https://live.sjtu.edu.cn",
                     "https://v.sjtu.edu.cn/",
                     "https://v.sjtu.edu.cn",
@@ -555,6 +561,7 @@ impl App {
                     "mss-live",
                     "https://mss2.sjtu.edu.cn",
                     "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/",
+                    "https://v.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
@@ -612,10 +619,12 @@ impl App {
                     .unwrap()
             });
 
-        let routes = legacy_video_proxy
+        let routes = live_video_proxy
             .or(legacy_canvas_video_proxy)
             .or(canvas_video_proxy)
             .or(canvas_live_proxy)
+            .or(mss_live_proxy)
+            .or(proxy_preflight)
             .or(ready_check);
         let handle = tokio::spawn(warp::serve(routes).run(([127, 0, 0, 1], proxy_port)));
         *self.handle.write().await = Some(handle);
