@@ -142,7 +142,7 @@ export default function LivePanel({ courseId }: { courseId: number }) {
       { type: "flv", isLive: true, url: playUrl },
       { enableStashBuffer: false, liveBufferLatencyChasing: true }
     );
-    player.on(mpegts.Events.ERROR, (_type, detail) => {
+    player.on(mpegts.Events.ERROR, (_type: string, detail: string) => {
       setPlaybackError(`直播流加载失败（${detail}），请重试或复制直链观看`);
     });
     player.attachMediaElement(video);
