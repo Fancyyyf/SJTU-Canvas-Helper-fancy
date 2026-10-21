@@ -176,6 +176,10 @@ impl App {
     }
 
     pub fn config_dir() -> Result<String> {
+        #[cfg(test)]
+        if let Ok(path) = std::env::var("SJTU_CANVAS_TEST_CONFIG_DIR") {
+            return Ok(path);
+        }
         if App::portable() {
             let exe_dir = std::env::current_exe()
                 .map(|path| path.parent().unwrap().to_owned())
@@ -313,6 +317,11 @@ impl App {
         let config_path = App::get_config_path(&account_info.current_account);
         tracing::info!("Read config path: {}", config_path);
         let config = App::read_config_from_file(&config_path).unwrap_or_default();
+        if account_info.current_account == Account::Default && !Path::new(&config_path).exists() {
+            if let Err(error) = fs::write(&config_path, serde_json::to_vec(&config).unwrap()) {
+                tracing::warn!("Could not initialize default account config: {error}");
+            }
+        }
 
         let canvas_base_url = Self::get_base_url(&config.account_type);
         let llm_config = crate::client::EffectiveLlmConfig::from_app_config(&config);

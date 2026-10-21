@@ -34,6 +34,7 @@ import { useCourses } from "../lib/hooks";
 import { logHandledError } from "../lib/logger";
 import { useAppMessage } from "../lib/message";
 import { Assignment, CalendarEvent, Colors, Course } from "../lib/model";
+import { filterCalendarEvents, isAssignmentEvent, isCompletedAssignment, type AssignmentFilter } from "../lib/calendar_filter";
 
 const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const monthOptions = [
@@ -59,7 +60,7 @@ function getCourseId(event: CalendarEvent) {
 }
 
 function getEventMoment(event: CalendarEvent) {
-  return dayjs(event.end_at || event.start_at || event.assignment.due_at);
+  return dayjs(event.end_at || event.start_at || event.assignment?.due_at || null);
 }
 
 function assignmentToCalendarEvent(assignment: Assignment, course: Course): CalendarEvent {
@@ -81,7 +82,7 @@ function assignmentToCalendarEvent(assignment: Assignment, course: Course): Cale
 }
 
 function eventIdentity(event: CalendarEvent) {
-  return event.assignment.id > 0
+  return event.assignment?.id > 0
     ? `${event.context_code}:assignment_${event.assignment.id}`
     : `${event.context_code}:event_${event.id}`;
 }
@@ -126,15 +127,24 @@ export default function CalendarPage() {
   const [contextCodes, setContextCodes] = useState<string[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [hintEvents, setHintEvents] = useState<CalendarEvent[]>([]);
+  const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>("all");
   const [loading, setLoading] = useState<boolean>(false);
   const [calendarFallbackActive, setCalendarFallbackActive] = useState(false);
   const [assignmentLoadWarning, setAssignmentLoadWarning] = useState("");
   const currentMonthRef = useRef<Dayjs>(dayjs());
+  const loadingRef = useRef(false);
+  const changeMonthRef = useRef<(date: Dayjs) => Promise<void>>();
   const contextCodesRef = useRef<string[]>([]);
   const assignmentDueEventsRef = useRef<CalendarEvent[]>([]);
   const courseScopeKey = courses.data.map((course) => course.id).join(",");
+  loadingRef.current = loading;
 
   useEffect(() => {
+    const handleKeyDownEvent = (event: KeyboardEvent) => {
+      if (loadingRef.current || event.repeat) return;
+      if (event.key === "ArrowRight") void changeMonthRef.current?.(currentMonthRef.current.add(1, "month"));
+      if (event.key === "ArrowLeft") void changeMonthRef.current?.(currentMonthRef.current.subtract(1, "month"));
+    };
     document.body.addEventListener("keydown", handleKeyDownEvent, true);
     return () => {
       document.body.removeEventListener("keydown", handleKeyDownEvent, true);
@@ -154,18 +164,6 @@ export default function CalendarPage() {
   useEffect(() => {
     contextCodesRef.current = contextCodes;
   }, [contextCodes]);
-
-  const handleKeyDownEvent = (event: KeyboardEvent) => {
-    if (loading) {
-      return;
-    }
-    if (event.key === "ArrowRight" && !event.repeat) {
-      void handleMonthChange(currentMonthRef.current.add(1, "month"));
-    }
-    if (event.key === "ArrowLeft" && !event.repeat) {
-      void handleMonthChange(currentMonthRef.current.subtract(1, "month"));
-    }
-  };
 
   const getColors = () => invoke("get_colors");
 
@@ -247,7 +245,9 @@ export default function CalendarPage() {
         startDate,
         endDate
       );
-      return dedupeEvents([...calendarEvents, ...assignmentEventsInRange]);
+      // Course assignments carry the current user's submission state. Keep them
+      // when the calendar API reports the same deadline without that detail.
+      return dedupeEvents([...assignmentEventsInRange, ...calendarEvents]);
     } catch (error) {
       setCalendarFallbackActive(true);
       logHandledError({
@@ -273,6 +273,7 @@ export default function CalendarPage() {
     date: Dayjs,
     assignmentDueEvents = assignmentDueEventsRef.current
   ) => {
+    loadingRef.current = true;
     setLoading(true);
     try {
       const gridDates = getMonthGridDates(date);
@@ -288,6 +289,7 @@ export default function CalendarPage() {
     } catch (error) {
       messageApi.error(`日历加载失败：${error}`);
     } finally {
+      loadingRef.current = false;
       setLoading(false);
     }
   };
@@ -353,17 +355,28 @@ export default function CalendarPage() {
   };
 
   const handleMonthChange = async (date: Dayjs) => {
+    currentMonthRef.current = date;
     setCurrentMonth(date);
     setSelectedDate(date);
     setCalendarFallbackActive(false);
     await handleInitCalendarEvents(contextCodesRef.current, date);
   };
+  changeMonthRef.current = handleMonthChange;
 
   const monthGridDates = useMemo(() => getMonthGridDates(currentMonth), [currentMonth]);
 
+  const visibleEvents = useMemo(
+    () => filterCalendarEvents(events, assignmentFilter),
+    [events, assignmentFilter]
+  );
+  const visibleHintEvents = useMemo(
+    () => filterCalendarEvents(hintEvents, assignmentFilter),
+    [hintEvents, assignmentFilter]
+  );
+
   const eventsByDate = useMemo(() => {
     const grouped = new Map<string, CalendarEvent[]>();
-    for (const event of events) {
+    for (const event of visibleEvents) {
       const key = getDateKey(getEventMoment(event));
       const current = grouped.get(key) ?? [];
       current.push(event);
@@ -376,24 +389,24 @@ export default function CalendarPage() {
       );
     }
     return grouped;
-  }, [events]);
+  }, [visibleEvents]);
 
   const selectedDayEvents = useMemo(() => {
     return eventsByDate.get(getDateKey(selectedDate)) ?? [];
   }, [eventsByDate, selectedDate]);
 
   const statItems = useMemo(() => {
-    const thisMonthCount = events.length;
+    const thisMonthCount = visibleEvents.length;
     const todayCount = eventsByDate.get(getDateKey(dayjs()))?.length ?? 0;
-    const urgentCount = hintEvents.length;
+    const urgentCount = visibleHintEvents.length;
     const selectedCount = selectedDayEvents.length;
     return [
       { label: "本月事项", value: `${thisMonthCount}`, icon: <CalendarMonthRoundedIcon /> },
       { label: "今日截止", value: `${todayCount}`, icon: <WarningAmberRoundedIcon /> },
-      { label: "七日提醒", value: `${urgentCount}`, icon: <EventAvailableRoundedIcon /> },
+      { label: "七日内事项", value: `${urgentCount}`, icon: <EventAvailableRoundedIcon /> },
       { label: "所选日期", value: `${selectedCount}`, icon: <TodayRoundedIcon /> },
     ];
-  }, [events.length, eventsByDate, hintEvents.length, selectedDayEvents.length]);
+  }, [visibleEvents.length, eventsByDate, visibleHintEvents.length, selectedDayEvents.length]);
 
   const yearOptions = useMemo(() => {
     const currentYear = dayjs().year();
@@ -501,12 +514,17 @@ export default function CalendarPage() {
                         使用左右方向键也可以切换月份。
                       </Typography>
                     </Box>
-                    <Chip
-                      icon={<AutoAwesomeRoundedIcon />}
-                      label={`共 ${events.length} 个去重后的日历事项`}
-                      color="primary"
-                      variant="outlined"
-                    />
+                    <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                      <TextField select size="small" label="作业状态" value={assignmentFilter}
+                        onChange={(event) => setAssignmentFilter(event.target.value as AssignmentFilter)}
+                        inputProps={{ "aria-label": "按作业完成状态筛选日程" }} sx={{ minWidth: 128 }}>
+                        <MenuItem value="all">全部</MenuItem>
+                        <MenuItem value="completed">已完成</MenuItem>
+                        <MenuItem value="incomplete">未完成</MenuItem>
+                      </TextField>
+                      <Chip icon={<AutoAwesomeRoundedIcon />} label={`显示 ${visibleEvents.length} 项`}
+                        color="primary" variant="outlined" />
+                    </Stack>
                   </Stack>
 
                   <Alert severity="info" sx={{ borderRadius: "18px" }}>
@@ -665,7 +683,7 @@ export default function CalendarPage() {
                                           },
                                         }}
                                       >
-                                        {event.title}
+                                        {isAssignmentEvent(event) && isCompletedAssignment(event) ? "✓ " : ""}{event.title}
                                       </MuiLink>
                                     </Tooltip>
                                   ))}
@@ -691,19 +709,19 @@ export default function CalendarPage() {
                 <CardContent sx={{ p: { xs: 2.25, md: 3 } }}>
                   <Stack spacing={2}>
                     <Box>
-                      <Typography variant="h5">七日内 DDL</Typography>
+                      <Typography variant="h5">七日内事项</Typography>
                       <Typography variant="body2" color="text.secondary">
-                        优先关注最近一周需要处理的事项。
+                        按上方作业状态筛选最近一周的截止事项。
                       </Typography>
                     </Box>
 
-                    {hintEvents.length === 0 ? (
+                    {visibleHintEvents.length === 0 ? (
                       <Alert severity="success" sx={{ borderRadius: "18px" }}>
                         暂无临近 DDL，尽情享受当下。
                       </Alert>
                     ) : (
                       <Stack spacing={1.25}>
-                        {hintEvents.map((event) => {
+                        {visibleHintEvents.map((event) => {
                           const now = dayjs();
                           const diff = getEventMoment(event).diff(now, "hour");
                           const days = Math.floor(diff / 24);
@@ -731,10 +749,15 @@ export default function CalendarPage() {
                                 <Typography variant="body2" color="text.secondary">
                                   {event.context_name}
                                 </Typography>
+                                {isAssignmentEvent(event) && <Chip size="small" variant="outlined"
+                                  color={isCompletedAssignment(event) ? "success" : "warning"}
+                                  label={isCompletedAssignment(event) ? "已完成" : "未完成"} sx={{ width: "fit-content" }} />}
                                 <Chip
                                   size="small"
                                   color={days <= 1 ? "warning" : "default"}
-                                  label={`还有 ${days} 天 ${hours} 小时`}
+                                  label={isCompletedAssignment(event)
+                                    ? `截止于 ${getEventMoment(event).format("MM/DD HH:mm")}`
+                                    : `还有 ${days} 天 ${hours} 小时`}
                                   sx={{ width: "fit-content" }}
                                 />
                               </Stack>
@@ -788,6 +811,9 @@ export default function CalendarPage() {
                               <Typography variant="body2" color="text.secondary">
                                 {event.context_name}
                               </Typography>
+                              {isAssignmentEvent(event) && <Chip size="small" variant="outlined"
+                                color={isCompletedAssignment(event) ? "success" : "warning"}
+                                label={isCompletedAssignment(event) ? "已完成" : "未完成"} sx={{ width: "fit-content" }} />}
                               <Typography variant="caption" color="text.secondary">
                                 截止时间：{getEventMoment(event).format("YYYY/MM/DD HH:mm")}
                               </Typography>

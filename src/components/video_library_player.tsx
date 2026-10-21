@@ -10,6 +10,7 @@ import { canSummarizeRecording, recordingKey, type VideoMaterial, type VideoSess
 import { recordingRequest, resolveRecording, enqueueVideoTrack } from "../lib/video_library_tasks";
 import type { CanvasVideo, VideoPlayInfo } from "../lib/model";
 import { useMediaElement } from "../lib/media_element";
+import { attachSynchronizedPlayback } from "../lib/video_sync";
 
 function playbackURL(url: string, port: number, source: CanvasVideo["source"]): string {
   try {
@@ -95,32 +96,25 @@ export default function VideoLibraryPlayer({ session, initialKey, seconds = 0, s
     const primary = mainRef.current;
     const sub = subRef.current;
     if (!primary || !sub || !sync) return;
-    const play = () => { void sub.play().catch(() => {}); };
-    const pause = () => sub.pause();
-    const synchronize = () => { sub.currentTime = primary.currentTime; sub.playbackRate = primary.playbackRate; };
-    const loaded = () => { synchronize(); if (!primary.paused) play(); };
-    primary.addEventListener("play", play); primary.addEventListener("pause", pause);
-    primary.addEventListener("seeked", synchronize); primary.addEventListener("ratechange", synchronize);
-    sub.addEventListener("loadedmetadata", loaded);
-    if (sub.readyState >= 1) loaded();
-    return () => {
-      primary.removeEventListener("play", play); primary.removeEventListener("pause", pause);
-      primary.removeEventListener("seeked", synchronize); primary.removeEventListener("ratechange", synchronize);
-      sub.removeEventListener("loadedmetadata", loaded);
-    };
+    return attachSynchronizedPlayback(primary, sub);
   }, [main, secondary, urls, sync, mainRef, subRef]);
 
   const remember = () => {
+    const primary = mainRef.current;
     for (const [index, element] of [[main, mainRef.current], [secondary, subRef.current]] as const) {
-      if (element && index >= 0) playbackStates.current.set(index, { time: element.currentTime, rate: element.playbackRate, paused: element.paused });
+      const source = sync ? primary : element;
+      if (source && index >= 0) playbackStates.current.set(index, { time: source.currentTime, rate: source.playbackRate, paused: source.paused });
     }
   };
   const restore = (element: HTMLVideoElement | null, index: number) => {
     if (!element) return;
     const saved = playbackStates.current.get(index);
-    element.currentTime = saved?.time ?? seek.current;
-    element.playbackRate = saved?.rate ?? 1;
-    if (saved?.paused) element.pause();
+    const primary = mainRef.current;
+    element.currentTime = sync
+      ? element === primary ? seek.current : primary?.readyState ? primary.currentTime : seek.current
+      : saved?.time ?? seek.current;
+    element.playbackRate = sync ? primary?.playbackRate ?? 1 : saved?.rate ?? 1;
+    if (sync ? (element === primary ? saved?.paused : primary?.paused) : saved?.paused) element.pause();
     else void element.play().catch(() => {});
   };
   const changeMain = (next: number) => {
@@ -160,7 +154,7 @@ export default function VideoLibraryPlayer({ session, initialKey, seconds = 0, s
           </Box>
           <Stack direction="row" flexWrap="wrap" gap={1} alignItems="center" sx={{ display: mini ? "none" : "flex" }}>
             {urls.length > 0 && <WorkspaceSelect size="small" label="主机位" value={main} sx={{ minWidth: 120 }} onChange={(e) => changeMain(+e.target.value)}>{urls.map((_, i) => <MenuItem key={i} value={i}>机位 {i + 1}</MenuItem>)}</WorkspaceSelect>}
-            {urls.length > 1 && <WorkspaceSelect size="small" label="副屏" value={secondary} sx={{ minWidth: 120 }} onChange={(e) => { remember(); setSecondary(+e.target.value); }}>
+            {urls.length > 1 && <WorkspaceSelect size="small" label="副屏" value={secondary} sx={{ minWidth: 120 }} onChange={(e) => { remember(); seek.current = mainRef.current?.currentTime ?? seek.current; setSecondary(+e.target.value); }}>
               <MenuItem value={-1}>关闭</MenuItem>{urls.map((_, i) => i !== main && <MenuItem key={i} value={i}>机位 {i + 1}</MenuItem>)}
             </WorkspaceSelect>}
             {secondary >= 0 && <Button onClick={() => changeMain(secondary)}>交换主副屏</Button>}

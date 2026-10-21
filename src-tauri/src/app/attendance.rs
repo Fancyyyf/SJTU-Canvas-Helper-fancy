@@ -273,7 +273,7 @@ impl App {
                 };
             }
         };
-        match resolve_python_environment(&preferred).await {
+        match resolve_python_environment(preferred).await {
             Ok((invocation, version)) => AttendancePythonStatus {
                 available: true,
                 interpreter: invocation_label(&invocation),

@@ -444,7 +444,7 @@ export default function HomePage() {
         <DialogTitle>自定义侧边栏快捷入口</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            首页会固定显示。你可以只把常用功能放到侧边栏；未选择的功能仍可从首页目录进入。
+            首页会固定显示。侧边栏图标可长按拖动排序，拖到移除区可隐藏；未选择的功能仍可从首页目录进入。
           </Typography>
           <Box
             sx={{

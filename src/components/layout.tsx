@@ -48,11 +48,12 @@ import { alpha, useTheme } from "@mui/material/styles";
 import { useAppMessage } from "../lib/message";
 import { logDiagnostic, logHandledError } from "../lib/logger";
 import { LOG_LEVEL_INFO } from "../lib/model";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { useConfigDispatch, useConfigSelector } from "../lib/hooks";
 import { navigationSlice } from "../lib/store";
+import { moveSidebarItem } from "../lib/sidebar_order";
 import { checkForUpdates } from "../lib/utils";
 import { useUpdateNotice } from "../lib/update_notice";
 import { ChangeLogModal } from "./change_log_modal";
@@ -63,6 +64,9 @@ import TaskPopover from "./task_popover";
 
 const drawerWidth = 272;
 const collapsedDrawerWidth = 92;
+const SIDEBAR_LONG_PRESS_MS = 420;
+
+type SidebarDrag = { key: string; x: number; y: number; target?: string; after?: boolean; remove?: boolean };
 
 const navigationItems = [
   { key: "home", label: "首页", icon: <HomeRoundedIcon />, path: "/home" },
@@ -129,6 +133,11 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
   const [customizeSidebarOpen, setCustomizeSidebarOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [sidebarDrag, setSidebarDrag] = useState<SidebarDrag | null>(null);
+  const sidebarDragRef = useRef<SidebarDrag | null>(null);
+  const pressRef = useRef<{ key: string; x: number; y: number } | null>(null);
+  const pressTimerRef = useRef<number>();
+  const suppressNavigationRef = useRef(false);
   const [messageApi, contextHolder] = useAppMessage();
   const { availableVersion, setAvailableVersion, previewOnly } = useUpdateNotice();
 
@@ -149,6 +158,8 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
       setMobileOpen(false);
     }
   }, [isDesktop, location.pathname]);
+
+  useEffect(() => () => window.clearTimeout(pressTimerRef.current), []);
 
   const handleOpenFeedback = async () => {
     try {
@@ -176,9 +187,8 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
 
 
   const displayedNavigationItems = useMemo(() => {
-    const visibleItems = navigationItems.filter(
-      (item) => item.key === "home" || visibleSidebarItemKeys.includes(item.key)
-    );
+    const itemsByKey = new Map(navigationItems.map((item) => [item.key, item]));
+    const visibleItems = [navigationItems[0], ...visibleSidebarItemKeys.map((key) => itemsByKey.get(key)).filter((item): item is typeof navigationItems[number] => Boolean(item))];
     if (!config?.debug_mode) {
       return visibleItems;
     }
@@ -208,6 +218,61 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
       recoverable: true,
       context: { visibleItemKeys: nextKeys, visibleItemCount: nextKeys.length },
     });
+  };
+
+  const startSidebarPress = (key: string, event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || key === "home" || key === "debug") return;
+    pressRef.current = { key, x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    window.clearTimeout(pressTimerRef.current);
+    pressTimerRef.current = window.setTimeout(() => {
+      const press = pressRef.current;
+      if (!press || press.key !== key) return;
+      const next = { key, x: press.x, y: press.y };
+      sidebarDragRef.current = next;
+      setSidebarDrag(next);
+    }, SIDEBAR_LONG_PRESS_MS);
+  };
+
+  const moveSidebarPress = (event: React.PointerEvent<HTMLElement>) => {
+    const press = pressRef.current;
+    if (!press) return;
+    if (!sidebarDragRef.current) {
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8) {
+        window.clearTimeout(pressTimerRef.current);
+        pressRef.current = null;
+      }
+      return;
+    }
+    const underPointer = document.elementFromPoint(event.clientX, event.clientY);
+    const remove = Boolean(underPointer?.closest("[data-sidebar-remove]"));
+    const targetElement = underPointer?.closest<HTMLElement>("[data-sidebar-key]");
+    const target = targetElement?.dataset.sidebarKey;
+    const after = targetElement ? event.clientY > targetElement.getBoundingClientRect().top + targetElement.offsetHeight / 2 : false;
+    const next = { key: press.key, x: event.clientX, y: event.clientY,
+      target: target !== "home" && target !== "debug" ? target : undefined, after, remove };
+    sidebarDragRef.current = next;
+    setSidebarDrag(next);
+  };
+
+  const finishSidebarPress = () => {
+    window.clearTimeout(pressTimerRef.current);
+    pressRef.current = null;
+    const drag = sidebarDragRef.current;
+    sidebarDragRef.current = null;
+    setSidebarDrag(null);
+    if (!drag) return;
+    suppressNavigationRef.current = true;
+    window.setTimeout(() => { suppressNavigationRef.current = false; }, 0);
+    if (drag.remove) updateVisibleSidebarItems(visibleSidebarItemKeys.filter((key) => key !== drag.key));
+    else if (drag.target) updateVisibleSidebarItems(moveSidebarItem(visibleSidebarItemKeys, drag.key, drag.target, Boolean(drag.after)));
+  };
+
+  const cancelSidebarPress = () => {
+    window.clearTimeout(pressTimerRef.current);
+    pressRef.current = null;
+    sidebarDragRef.current = null;
+    setSidebarDrag(null);
   };
 
   const customizeSidebarButton = (
@@ -301,14 +366,31 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
           )}
         </Stack>
 
+        {sidebarDrag && <Box data-sidebar-remove="true" sx={{
+          position: "sticky", top: 0, zIndex: 2,
+          border: "2px dashed", borderColor: sidebarDrag.remove ? "error.main" : "divider",
+          bgcolor: sidebarDrag.remove ? "error.light" : "background.paper",
+          color: sidebarDrag.remove ? "error.contrastText" : "text.secondary",
+          borderRadius: 2, px: 2, py: 1.5, textAlign: "center", fontWeight: 700,
+          transition: "background-color 0.15s ease, border-color 0.15s ease",
+        }}>拖到这里移除快捷入口</Box>}
+
         <List sx={{ p: 0, display: "grid", gap: 0.5 }}>
           {displayedNavigationItems.map((item, index) => {
             const selected = currentKey === item.key;
             const button = (
               <ListItemButton
                 key={item.key}
+                data-sidebar-key={item.key}
                 component={Link}
                 to={item.path}
+                onClickCapture={(event) => {
+                  if (suppressNavigationRef.current) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    suppressNavigationRef.current = false;
+                  }
+                }}
                 selected={selected}
                 className="nav-enter"
                 style={{ "--rise-delay": `${index * 30}ms` } as React.CSSProperties}
@@ -322,8 +404,14 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
                   transition:
                     "background-color 0.18s ease, color 0.18s ease, transform 0.18s ease",
                   "&:hover": {
-                    transform: "translateX(2px)",
+                    transform: sidebarDrag?.key === item.key ? "scale(1.03)" : "translateX(3px)",
                   },
+                  opacity: sidebarDrag?.key === item.key ? 0.38 : 1,
+                  boxShadow: sidebarDrag?.key === item.key ? 4 : "none",
+                  borderTop: "2px solid transparent",
+                  borderBottom: "2px solid transparent",
+                  borderTopColor: sidebarDrag?.target === item.key && !sidebarDrag.after ? "primary.main" : "transparent",
+                  borderBottomColor: sidebarDrag?.target === item.key && sidebarDrag.after ? "primary.main" : "transparent",
                   "&.Mui-selected": {
                     bgcolor: "action.selected",
                     color: "primary.main",
@@ -335,10 +423,16 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
                 }}
               >
                 <ListItemIcon
+                  onPointerDown={(event) => startSidebarPress(item.key, event)}
+                  onPointerMove={moveSidebarPress}
+                  onPointerUp={finishSidebarPress}
+                  onPointerCancel={cancelSidebarPress}
                   sx={{
                     minWidth: collapsed && isDesktop ? 0 : 38,
                     color: "inherit",
                     justifyContent: "center",
+                    cursor: item.key === "home" || item.key === "debug" ? "default" : "grab",
+                    touchAction: "none",
                   }}
                 >
                   {item.icon}
@@ -367,6 +461,13 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
             );
           })}
         </List>
+
+        {sidebarDrag && <Box sx={{
+          position: "fixed", left: sidebarDrag.x + 14, top: sidebarDrag.y + 10,
+          pointerEvents: "none", zIndex: 1600, px: 1.5, py: 0.75,
+          borderRadius: 2, bgcolor: "primary.main", color: "primary.contrastText",
+          boxShadow: 6, fontSize: 13, fontWeight: 700,
+        }}>{navigationItems.find((item) => item.key === sidebarDrag.key)?.label}</Box>}
 
         {collapsed && isDesktop ? (
           <Tooltip title="编辑侧边栏" placement="right">
@@ -541,7 +642,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
         <DialogTitle>自定义侧边栏快捷入口</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            首页始终保留。未固定到侧边栏的功能仍可从首页功能目录进入。
+            首页始终保留。长按侧边栏图标可拖动排序，拖到移除区域可隐藏；未固定的功能仍可从首页进入。
           </Typography>
           <Box
             sx={{

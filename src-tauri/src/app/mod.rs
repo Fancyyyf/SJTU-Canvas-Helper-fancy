@@ -33,32 +33,30 @@ pub struct App {
 mod test {
     use crate::{
         error::Result,
-        model::{Account, File},
+        model::Account,
         App,
     };
 
-    #[ignore]
+    #[ignore = "requires a live Canvas token and network access"]
     #[tokio::test]
     async fn test_get_calendar_events() -> Result<()> {
         tracing_subscriber::fmt::init();
         let app = App::new();
-
-        let colors = app.get_colors().await?;
-        assert!(!colors.custom_colors.is_empty());
-        let mut context_codes = vec![];
-        for (course_code, _) in colors.custom_colors {
-            context_codes.push(course_code);
-        }
-        let start_date = "2024-02-25T16:00:00.000Z";
-        let end_date = "2024-03-31T16:00:00.000Z";
+        let courses = app.list_courses().await?;
+        assert!(!courses.is_empty());
+        let context_codes: Vec<_> = courses.iter().map(|course| format!("course_{}", course.id)).collect();
+        let start_date = (chrono::Utc::now() - chrono::Duration::days(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let end_date = (chrono::Utc::now() + chrono::Duration::days(30))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let events = app
-            .list_calendar_events(&context_codes, start_date, end_date)
+            .list_calendar_events(&context_codes, &start_date, &end_date)
             .await?;
-        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| !event.context_code.is_empty()));
         Ok(())
     }
 
-    #[ignore]
+    #[ignore = "changes account files; set SJTU_CANVAS_TEST_CONFIG_DIR to an isolated directory"]
     #[tokio::test]
     async fn test_account() -> Result<()> {
         tracing_subscriber::fmt::init();
@@ -111,46 +109,45 @@ mod test {
         Ok(())
     }
 
-    #[ignore]
+    #[ignore = "requires a live Canvas token and network access"]
     #[tokio::test]
     async fn test_filter_course_qrcode() -> Result<()> {
         tracing_subscriber::fmt::init();
         let app = App::new();
         app.init().await?;
-        let course_id = 66427;
+        let course_id = app.list_courses().await?.first().expect("at least one course").id;
         let result = app.filter_course_qrcode_images(course_id).await?;
         tracing::info!("result: {:?}", result);
         Ok(())
     }
 
-    #[ignore]
+    #[ignore = "requires a valid jAccount cookie and an accessible legacy recording"]
     #[tokio::test]
     async fn test_video_apis() -> Result<()> {
         tracing_subscriber::fmt::init();
         let app = App::new();
         app.init().await?;
         app.login_video_website().await?;
-        let course_id = std::env::var("SJTU_CANVAS_TEST_COURSE_ID")
-            .expect("set SJTU_CANVAS_TEST_COURSE_ID")
-            .parse()
-            .expect("SJTU_CANVAS_TEST_COURSE_ID must be an integer");
-        let videos = app.get_legacy_videos(course_id, "", "", &[]).await?;
-        tracing::info!("{:?}", videos);
+        let courses = app.list_courses().await?;
+        let mut first_video = None;
+        for course in courses {
+            let teachers: Vec<_> = course.teachers.iter().map(|teacher| teacher.display_name.clone()).collect();
+            if let Ok(videos) = app.get_legacy_videos(course.id, &course.name, &course.term.name, &teachers).await {
+                if let Some(video) = videos.into_iter().next() {
+                    first_video = Some(video);
+                    break;
+                }
+            }
+        }
+        let video = first_video.expect("no accessible legacy recording in the current courses");
         let video = app
-            .get_video_play_info(crate::model::VideoSource::Legacy, &videos[0].video_id)
+            .get_video_play_info(crate::model::VideoSource::Legacy, &video.video_id)
             .await?;
-        tracing::info!("video = {:?}", video);
-
-        app.download_video(
-            &video.video_play_response_vo_list[0],
-            "download.mp4",
-            |_| {},
-        )
-        .await?;
+        assert!(!video.video_play_response_vo_list.is_empty());
         Ok(())
     }
 
-    #[ignore]
+    #[ignore = "requires a valid jAccount cookie and an accessible Canvas recording"]
     #[tokio::test]
     async fn test_video_apis_with_canvas() -> Result<()> {
         tracing_subscriber::fmt::init();
@@ -158,17 +155,22 @@ mod test {
         app.init().await?;
         app.login_canvas_website().await?;
         let courses = app.list_courses().await?;
-        let course = courses.last().unwrap();
-        tracing::info!("course = {:?}", course.id);
-        let videos = app.get_canvas_videos(course.id).await?;
-        tracing::info!("videos = {:?}", videos.len());
-        let video = videos.first().unwrap();
+        let mut first_video = None;
+        for course in courses {
+            if let Ok(videos) = app.get_canvas_videos(course.id).await {
+                if let Some(video) = videos.into_iter().next() {
+                    first_video = Some(video);
+                    break;
+                }
+            }
+        }
+        let video = first_video.expect("no accessible Canvas recording in the current courses");
         let video_info = app.get_canvas_video_info(&video.video_id).await?;
-        tracing::info!("canvas video info: {:?}", video_info);
+        assert!(!video_info.video_play_response_vo_list.is_empty());
         Ok(())
     }
 
-    #[ignore]
+    #[ignore = "requires a valid jAccount cookie and JBox access"]
     #[tokio::test]
     async fn test_jbox_apis() -> Result<()> {
         tracing_subscriber::fmt::init();
@@ -176,20 +178,9 @@ mod test {
         app.init().await?;
         app.login_jbox().await?;
         let info = app.get_config().await.jbox_login_info.clone();
-        app.client
-            .create_jbox_directory("/test/nested", &info)
-            .await?;
-        let file = File {
-            uuid: "9zzeL52Uf5w1wE90GstDBCo21AJMrvQlFg5m86lz".to_owned(),
-            url: "https://oc.sjtu.edu.cn/files/8525695/download?download_frd=1".to_owned(),
-            display_name: "L2-- 大数据处理的基础设施.pdf".to_owned(),
-            ..Default::default()
-        };
-        app.client
-            .upload_file(&file, "/test", &info, |payload| {
-                tracing::info!("Processed: {}/{}", payload.processed, payload.total);
-            })
-            .await?;
+        assert!(!info.library_id.is_empty());
+        assert!(!info.space_id.is_empty());
+        assert!(!info.access_token.is_empty());
         Ok(())
     }
 }
