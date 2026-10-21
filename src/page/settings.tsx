@@ -45,11 +45,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactJson from "react-json-view-ts";
 import BasicLayout from "../components/layout";
 import LogModal from "../components/log_modal";
+import { changeSessionAccount } from "../lib/account_sessions";
+import VideoSummarySettings from "../components/video_summary_settings";
+import { videoSummaryOptions, videoSummaryOptionsError } from "../lib/video_summary_config";
 import { WorkspaceHero } from "../components/workspace_hero";
 import { LoginAlert } from "../components/login_alert";
 import { getConfig, saveConfig, updateConfig } from "../lib/config";
 import { useConfigDispatch, useQRCode } from "../lib/hooks";
 import { logDiagnostic, logHandledError } from "../lib/logger";
+import {
+  DEFAULT_LLM_BASE_URL,
+  DEFAULT_LLM_MODEL,
+  normalizeLlmConfigForSettings,
+} from "../lib/llm_config";
 import { useAppMessage } from "../lib/message";
 import {
   AccountInfo,
@@ -69,8 +77,11 @@ const MIN_LLM_TEMPERATURE = 0;
 const MAX_LLM_TEMPERATURE = 2;
 const LLM_TEMPERATURE_STEP = 0.1;
 const CANVAS_TOKEN_URL = "https://oc.sjtu.edu.cn/profile/settings";
+const ZHIYUAN_LLM_BASE_URL = "https://models.sjtu.edu.cn/api/v1";
+const ZHIYUAN_LLM_DEFAULT_MODEL = "deepseek-reasoner";
 
 const URL_PROVIDER_MAP: [RegExp, string][] = [
+  [/models\.sjtu\.edu\.cn/, "sjtu"],
   [/deepseek/, "deepseek"],
   [/moonshot/, "moonshot"],
   [/openai/, "openai"],
@@ -101,8 +112,19 @@ const URL_PROVIDER_MAP: [RegExp, string][] = [
   [/minimax/, "minimax"],
 ];
 
-const PROVIDER_PRESETS: { key: string; name: string; baseUrl: string }[] = [
+const PROVIDER_PRESETS: {
+  key: string;
+  name: string;
+  baseUrl: string;
+  defaultModel?: string;
+}[] = [
   { key: "", name: "其他 (手动填写)", baseUrl: "" },
+  {
+    key: "sjtu",
+    name: "交大致远一号",
+    baseUrl: ZHIYUAN_LLM_BASE_URL,
+    defaultModel: ZHIYUAN_LLM_DEFAULT_MODEL,
+  },
   { key: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com" },
   { key: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { key: "moonshot", name: "Kimi (Moonshot)", baseUrl: "https://api.moonshot.cn/v1" },
@@ -128,6 +150,34 @@ function detectProviderKey(baseUrl: string): string | null {
     if (rx.test(url)) return key;
   }
   return null;
+}
+
+function LlmProviderIcon({ provider, size }: { provider: string; size: number }) {
+  if (provider === "sjtu") {
+    return (
+      <Box
+        aria-hidden="true"
+        sx={{
+          width: size,
+          height: size,
+          flex: `0 0 ${size}px`,
+          borderRadius: `${Math.max(5, Math.round(size / 4))}px`,
+          bgcolor: "#9e1b32",
+          color: "#fff",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: `${Math.round(size * 0.55)}px`,
+          fontWeight: 800,
+          lineHeight: 1,
+        }}
+      >
+        交
+      </Box>
+    );
+  }
+
+  return <ProviderIcon provider={provider} size={size} />;
 }
 
 const cardSx = {
@@ -477,16 +527,21 @@ export default function SettingsPage() {
         invoke<SystemSettings>("get_system_settings"),
       ]);
       const accountInfo = (await invoke("read_account_info")) as AccountInfo;
-      const normalizedConfig: AppConfig = {
+      const normalizedConfig = normalizeLlmConfigForSettings({
         ...config,
         theme: config.theme ?? "light",
         compact_mode: config.compact_mode ?? false,
+        experimental_task_center_only: config.experimental_task_center_only ?? false,
+        experimental_ppt_cleanup: config.experimental_ppt_cleanup ?? false,
         mcp_enabled: config.mcp_enabled ?? false,
         mcp_port: config.mcp_port || 3100,
         proxy_port: config.proxy_port === 0 ? DEFAULT_PROXY_PORT : config.proxy_port,
         llm_api_keys: config.llm_api_keys ?? [],
         llm_active_api_key: config.llm_active_api_key ?? "",
-      };
+        video_summary_prompt: videoSummaryOptions(config).prompt,
+        video_summary_context_tokens: videoSummaryOptions(config).contextTokens,
+        video_summary_output_tokens: videoSummaryOptions(config).outputTokens,
+      });
 
       setCurrentAccount(accountInfo.current_account);
       setFormData(normalizedConfig);
@@ -614,6 +669,9 @@ export default function SettingsPage() {
       return;
     }
 
+    const summaryError = videoSummaryOptionsError(videoSummaryOptions(formData));
+    if (summaryError) { messageApi.error(summaryError); return; }
+
     try {
       await saveConfig(formData);
       setInitialSnapshot(JSON.stringify(formData));
@@ -716,7 +774,7 @@ export default function SettingsPage() {
 
   const handleSwitchAccount = async (account: string) => {
     try {
-      await invoke("switch_account", { account });
+      await changeSessionAccount(() => invoke("switch_account", { account }));
       await initConfig();
     } catch (e) {
       messageApi.error(`切换账号失败：${e}`);
@@ -725,7 +783,7 @@ export default function SettingsPage() {
 
   const handleDeleteAccount = useCallback(async () => {
     try {
-      await invoke("delete_account", { account: currentAccount });
+      await changeSessionAccount(() => invoke("delete_account", { account: currentAccount }));
       await initConfig();
       messageApi.success("删除账号成功！");
     } catch (e) {
@@ -1246,6 +1304,43 @@ export default function SettingsPage() {
                 <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
                   <Stack spacing={3}>
                     <Box>
+                      <Typography variant="h5">实验性功能</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        默认关闭，保存后生效。
+                      </Typography>
+                    </Box>
+                    <Box>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={formData?.experimental_task_center_only ?? false}
+                            onChange={(event) => updateField("experimental_task_center_only", event.target.checked)}
+                          />
+                        }
+                        label="使用任务中心替代页面任务列表"
+                      />
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                        开启后，使用左下角任务中心；关闭后，使用各页任务列表。切换不会中断任务。
+                      </Typography>
+                    </Box>
+                    <Box>
+                      <FormControlLabel
+                        control={<Switch checked={formData?.experimental_ppt_cleanup ?? false} onChange={(event) => updateField("experimental_ppt_cleanup", event.target.checked)} />}
+                        label="导出 PPT 时去除无用页面"
+                      />
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                        根据 OCR 排除特征明确的桌面和签到页面，并将连续重复或动画增量切片合并为完整画面。禁止跨页面回访合并。应用于 AI 总结与追问及 PDF 导出；字幕保持完整。文字不足或判断不明确时保留，图形变化可能无法由 OCR 识别。默认关闭，关闭后可重新导出全部切片。
+                      </Typography>
+                    </Box>
+                    {renderCardSaveAction("保存实验性功能")}
+                  </Stack>
+                </CardContent>
+              </Card>
+
+              <Card sx={cardSx}>
+                <CardContent sx={{ p: { xs: 2.5, md: 3 } }}>
+                  <Stack spacing={3}>
+                    <Box>
                       <Typography variant="h5">高级选项</Typography>
                       <Typography variant="body2" color="text.secondary">
                         这部分用于接入 OpenAI-compatible 的 LLM 功能。
@@ -1300,7 +1395,7 @@ export default function SettingsPage() {
                               return (
                                 <MenuItem key={entry.name} value={entry.name}>
                                   <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                                    {pv ? <ProviderIcon provider={pv} size={22} /> : null}
+                                    {pv ? <LlmProviderIcon provider={pv} size={22} /> : null}
                                     <Typography variant="body2">{entry.name}</Typography>
                                   </Box>
                                 </MenuItem>
@@ -1335,7 +1430,7 @@ export default function SettingsPage() {
                             >
                               <Stack spacing={2.5}>
                                 <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-                                  {pv ? <ProviderIcon provider={pv} size={32} /> : null}
+                                  {pv ? <LlmProviderIcon provider={pv} size={32} /> : null}
                                   <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
                                     {entry.name}
                                   </Typography>
@@ -1420,7 +1515,7 @@ export default function SettingsPage() {
                                       setFormData(next);
                                       try { await saveConfig(next); } catch (e) { messageApi.error(e as string); }
                                     }}
-                                    placeholder={formData?.llm_base_url || "https://api.deepseek.com/v1"}
+                                    placeholder={formData?.llm_base_url || DEFAULT_LLM_BASE_URL}
                                     autoComplete="off"
                                   />
                                   <Autocomplete
@@ -1454,7 +1549,7 @@ export default function SettingsPage() {
                                       <TextField
                                         {...params}
                                         label="Model"
-                                        placeholder={formData?.llm_model || "deepseek-chat"}
+                                        placeholder={formData?.llm_model || DEFAULT_LLM_MODEL}
                                       />
                                     )}
                                   />
@@ -1521,7 +1616,7 @@ export default function SettingsPage() {
                       <DialogTitle>
                         <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                           {detectProviderKey(newKeyBaseUrl || formData?.llm_base_url || "") ? (
-                            <ProviderIcon provider={detectProviderKey(newKeyBaseUrl || formData?.llm_base_url || "")!} size={28} />
+                            <LlmProviderIcon provider={detectProviderKey(newKeyBaseUrl || formData?.llm_base_url || "")!} size={28} />
                           ) : (
                             <Box sx={{ width: 28, height: 28, borderRadius: "7px", bgcolor: "#6B7280", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: "0.7rem", fontWeight: 800 }}>
                               ?
@@ -1543,17 +1638,17 @@ export default function SettingsPage() {
                               const preset = PROVIDER_PRESETS.find((p) => p.key === val);
                               if (preset && preset.baseUrl) {
                                 setNewKeyBaseUrl(preset.baseUrl);
-                                setNewKeyModel("");
                               } else {
                                 setNewKeyBaseUrl("");
                               }
+                              setNewKeyModel(preset?.defaultModel ?? "");
                             }}
                             helperText="选择主流服务商后自动填入 Base URL 和 Model 建议。"
                           >
                             {PROVIDER_PRESETS.map((p) => (
                               <MenuItem key={p.key} value={p.key}>
                                 <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                                  {p.key ? <ProviderIcon provider={p.key} size={20} /> : null}
+                                  {p.key ? <LlmProviderIcon provider={p.key} size={20} /> : null}
                                   <Typography variant="body2">{p.name}</Typography>
                                 </Box>
                               </MenuItem>
@@ -1604,7 +1699,7 @@ export default function SettingsPage() {
                               setNewKeyBaseUrl(event.target.value);
                               setNewKeyProvider("");
                             }}
-                            placeholder={formData?.llm_base_url || "https://api.deepseek.com"}
+                            placeholder={formData?.llm_base_url || DEFAULT_LLM_BASE_URL}
                             helperText={
                               detectProviderKey(newKeyBaseUrl || formData?.llm_base_url || "")
                                 ? `检测到：${detectProviderKey(newKeyBaseUrl || formData?.llm_base_url || "")!}`
@@ -1627,7 +1722,7 @@ export default function SettingsPage() {
                               <TextField
                                 {...params}
                                 label="Model"
-                                placeholder={formData?.llm_model || "deepseek-chat"}
+                                placeholder={formData?.llm_model || DEFAULT_LLM_MODEL}
                                 helperText="可输入任意模型名，或从建议中选择。"
                               />
                             )}
@@ -1702,6 +1797,12 @@ export default function SettingsPage() {
                         }}
                       />
                     </Box>
+
+                    <Divider />
+                    <VideoSummarySettings config={{ video_summary_prompt: formData?.video_summary_prompt,
+                      video_summary_context_tokens: formData?.video_summary_context_tokens,
+                      video_summary_output_tokens: formData?.video_summary_output_tokens }}
+                      onChange={(fields) => setFormData((previous) => previous ? { ...previous, ...fields } : previous)} />
 
                     <Box
                       sx={{

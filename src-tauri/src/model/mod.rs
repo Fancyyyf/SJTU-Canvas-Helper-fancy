@@ -1,5 +1,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
+mod video_summary;
+pub use video_summary::*;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Course {
@@ -71,6 +73,8 @@ pub struct File {
     pub mime_class: String,
     #[serde(default, rename = "content-type")]
     pub content_type: String,
+    #[serde(default)]
+    pub preview_url: Option<String>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,6 +202,12 @@ pub struct AppConfig {
     pub llm_api_keys: Vec<LlmApiKeyEntry>,
     #[serde(default)]
     pub llm_active_api_key: String,
+    #[serde(default = "default_video_summary_prompt")]
+    pub video_summary_prompt: String,
+    #[serde(default = "default_video_context_tokens")]
+    pub video_summary_context_tokens: u32,
+    #[serde(default = "default_video_output_tokens")]
+    pub video_summary_output_tokens: u32,
     #[serde(default)]
     pub ja_auth_cookie: String,
     #[serde(default)]
@@ -226,6 +236,10 @@ pub struct AppConfig {
     pub theme: Theme,
     #[serde(default)]
     pub compact_mode: bool,
+    #[serde(default)]
+    pub experimental_task_center_only: bool,
+    #[serde(default)]
+    pub experimental_ppt_cleanup: bool,
     #[serde(default)]
     pub color_primary: Option<String>,
     #[serde(default)]
@@ -265,12 +279,17 @@ impl Default for AppConfig {
             llm_temperature: Default::default(),
             theme: Default::default(),
             compact_mode: Default::default(),
+            experimental_task_center_only: false,
+            experimental_ppt_cleanup: false,
             color_primary: Default::default(),
             mcp_enabled: Default::default(),
             mcp_port: 3100,
             debug_mode: Default::default(),
             llm_api_keys: Default::default(),
             llm_active_api_key: Default::default(),
+            video_summary_prompt: default_video_summary_prompt(),
+            video_summary_context_tokens: default_video_context_tokens(),
+            video_summary_output_tokens: default_video_output_tokens(),
         }
     }
 }
@@ -1129,6 +1148,9 @@ pub struct CanvasVideo {
     pub lesson_number: i64,
     pub daily_lesson_number: i64,
     pub playable: bool,
+    /// Raw transcript/PPT readiness hint from the list; None means unknown.
+    #[serde(default)]
+    pub ai_available: Option<bool>,
     pub availability: String,
     pub availability_label: String,
 }
@@ -1140,6 +1162,44 @@ pub enum VideoSource {
     Canvas,
     VideoSpace,
     Legacy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLiveSession {
+    pub id: String,
+    pub teaching_class_id: i64,
+    pub title: String,
+    pub teacher_name: String,
+    pub classroom_name: String,
+    pub begin_time: String,
+    pub end_time: String,
+    pub start_time: i64,
+    pub finish_time: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLiveList {
+    pub sessions: Vec<CanvasLiveSession>,
+    pub server_time: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLiveTrack {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLiveInfo {
+    pub start_time: i64,
+    pub finish_time: i64,
+    pub server_time: i64,
+    pub tracks: Vec<CanvasLiveTrack>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1259,6 +1319,12 @@ pub struct CanvasVideoSubTitle {
 pub struct CanvasVideoPPT {
     pub create_sec: String,
     pub ocr: Vec<CanvasVideoPPTOcr>,
+    #[serde(default)]
+    pub ocr_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_start_sec: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_slide_secs: Vec<String>,
     pub ppt_img_url: Option<String>,
 }
 

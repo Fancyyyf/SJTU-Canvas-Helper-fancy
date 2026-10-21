@@ -15,10 +15,10 @@ use model::{
     Account, AccountInfo, AnnualReport, AppConfig, Assignment, AttendancePythonStatus,
     AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, CloseBehavior, Colors,
     Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
-    FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LiveInfo, LogLevel,
-    ModuleItem,
-    NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission, SystemSettings,
-    User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
+    FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel,
+    ModuleItem, NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission,
+    SystemSettings, User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo,
+    VideoPlayInfo, VideoSource, CanvasLiveList, CanvasLiveInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -378,6 +378,28 @@ async fn list_course_files(course_id: i64) -> Result<Vec<File>> {
 }
 
 #[tauri::command]
+async fn open_file_preview_window(
+    app: tauri::AppHandle,
+    file_id: i64,
+    title: String,
+) -> Result<()> {
+    let session_url = APP.get_file_preview_session_url(file_id).await?;
+    let url = session_url
+        .parse()
+        .map_err(|error| AppError::FilePreview(format!("Invalid preview URL: {error}")))?;
+    let label = format!("file-preview-{}", uuid::Uuid::new_v4());
+
+    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::External(url))
+        .title(title)
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(720.0, 480.0)
+        .center()
+        .build()
+        .map_err(|error| AppError::FilePreview(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn list_course_images(course_id: i64) -> Result<Vec<File>> {
     APP.list_course_images(course_id).await
 }
@@ -656,6 +678,11 @@ async fn open_my_file(name: String, folder_path: String) -> Result<()> {
 }
 
 #[tauri::command]
+async fn open_local_path(path: String) -> Result<()> {
+    APP.open_local_path(&path)
+}
+
+#[tauri::command]
 async fn open_save_dir() -> Result<()> {
     APP.open_save_dir().await
 }
@@ -737,6 +764,21 @@ async fn download_my_file<R: Runtime>(
         let _ = window.emit("download://progress", progress);
     })
     .await
+}
+
+#[tauri::command]
+async fn download_course_file_as_pdf(
+    file: File,
+    course: Course,
+    folder_path: String,
+) -> Result<()> {
+    APP.download_course_file_as_pdf(&file, &course, &folder_path)
+        .await
+}
+
+#[tauri::command]
+async fn download_my_file_as_pdf(file: File, folder_path: String) -> Result<()> {
+    APP.download_my_file_as_pdf(&file, &folder_path).await
 }
 
 #[tauri::command]
@@ -939,6 +981,16 @@ async fn get_canvas_videos(course_id: i64) -> Result<Vec<CanvasVideo>> {
 }
 
 #[tauri::command]
+async fn get_video_live_sessions(canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveList> {
+    APP.get_video_live_sessions(canvas_course_id, teaching_class_id).await
+}
+
+#[tauri::command]
+async fn get_video_live_info(course_id: String, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveInfo> {
+    APP.get_video_live_info(&course_id, canvas_course_id, teaching_class_id).await
+}
+
+#[tauri::command]
 async fn list_video_space_courses() -> Result<Vec<Course>> {
     APP.list_video_space_courses().await
 }
@@ -985,23 +1037,20 @@ async fn get_canvas_video_info(video_id: String) -> Result<VideoInfo> {
 }
 
 #[tauri::command]
-async fn get_canvas_live_info(course_id: i64) -> Result<LiveInfo> {
-    APP.get_canvas_live_info(course_id).await
-}
-
-#[tauri::command]
 async fn get_video_play_info(source: VideoSource, video_id: String) -> Result<VideoInfo> {
     APP.get_video_play_info(source, &video_id).await
 }
 
 #[tauri::command]
 async fn prepare_proxy(trace_id: Option<String>) -> Result<bool> {
-    APP.prepare_proxy(trace_id.as_deref()).await
+    let _ = trace_id;
+    APP.prepare_proxy().await
 }
 
 #[tauri::command]
 async fn stop_proxy(trace_id: Option<String>) {
-    APP.stop_proxy(trace_id.as_deref()).await
+    let _ = trace_id;
+    APP.stop_proxy().await
 }
 
 #[tauri::command]
@@ -1023,6 +1072,41 @@ async fn download_subtitle(canvas_course_id: i64, save_path: String) -> Result<(
 }
 
 #[tauri::command]
+async fn prepare_video_material(
+    request: app::video_library::RecordingRequest,
+    prefer_before: Option<bool>,
+    include_ocr: Option<bool>,
+    clean_up_ppt: Option<bool>,
+) -> Result<app::video_library::VideoMaterial> {
+    APP.prepare_video_material(request, prefer_before.unwrap_or(false), include_ocr.unwrap_or(true), clean_up_ppt).await
+}
+
+#[tauri::command]
+async fn chat_video_materials(text: String, messages: Vec<LLMChatMessage>, options: Option<model::VideoSummaryOptions>, prepared_context: Option<model::VideoPreparedContext>, on_chunk: tauri::ipc::Channel<String>, on_status: tauri::ipc::Channel<String>) -> Result<model::VideoChatResponse> {
+    let mut callback = move |chunk| { let _ = on_chunk.send(chunk); };
+    let mut status_callback = move |status| { let _ = on_status.send(status); };
+    APP.chat_video_materials(text, messages, options, prepared_context, Some(&mut callback), &mut status_callback).await
+}
+
+#[tauri::command]
+async fn export_video_materials(
+    requests: Vec<app::video_library::RecordingRequest>,
+    kind: String,
+    directory: String,
+    name: String,
+    all_tracks: bool,
+    on_progress: tauri::ipc::Channel<app::video_library::ExportProgress>,
+) -> Result<app::video_library::ExportResult> {
+    APP.export_video_materials(requests, kind, directory, name, all_tracks, Arc::new(move |progress| { let _ = on_progress.send(progress); }))
+        .await
+}
+
+#[tauri::command]
+fn create_video_export_directory(directory: String, course: String) -> Result<String> {
+    app::video_library::create_export_directory(&directory, &course)
+}
+
+#[tauri::command]
 async fn summarize_subtitle(canvas_course_id: i64) -> Result<String> {
     APP.summarize_subtitle(canvas_course_id).await
 }
@@ -1032,7 +1116,7 @@ async fn download_ppt<R: Runtime>(
     window: Window<R>,
     course_id: i64,
     save_path: String,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let window = Arc::new(window);
     APP.download_ppt(course_id, &save_path, move |progress| {
         let _ = window.clone().emit("ppt_download://progress", progress);
@@ -1049,6 +1133,18 @@ async fn login_jbox() -> Result<()> {
 #[tauri::command]
 async fn upload_file<R: Runtime>(window: Window<R>, file: File, save_dir: String) -> Result<()> {
     APP.upload_file(&file, &save_dir, |progress| {
+        let _ = window.emit("file_upload://progress", progress);
+    })
+    .await
+}
+
+#[tauri::command]
+async fn upload_file_as_pdf<R: Runtime>(
+    window: Window<R>,
+    file: File,
+    save_dir: String,
+) -> Result<()> {
+    APP.upload_file_as_pdf(&file, &save_dir, |progress| {
         let _ = window.emit("file_upload://progress", progress);
     })
     .await
@@ -1217,6 +1313,7 @@ async fn main() -> Result<()> {
             list_discussion_topics,
             sync_course_files,
             list_course_files,
+            open_file_preview_window,
             list_course_images,
             list_course_users,
             list_course_students,
@@ -1252,6 +1349,7 @@ async fn main() -> Result<()> {
             open_my_file,
             open_file,
             open_save_dir,
+            open_local_path,
             open_config_dir,
             delete_file,
             delete_file_with_name,
@@ -1262,6 +1360,8 @@ async fn main() -> Result<()> {
             download_file,
             download_course_file,
             download_my_file,
+            download_course_file_as_pdf,
+            download_my_file_as_pdf,
             check_path,
             export_users,
             update_grade,
@@ -1279,6 +1379,8 @@ async fn main() -> Result<()> {
             get_uuid,
             express_login,
             get_canvas_videos,
+            get_video_live_sessions,
+            get_video_live_info,
             list_video_space_courses,
             get_video_space_videos,
             get_legacy_videos,
@@ -1287,18 +1389,22 @@ async fn main() -> Result<()> {
             get_video_course,
             get_video_info,
             get_canvas_video_info,
-            get_canvas_live_info,
             get_video_play_info,
             download_video,
             login_video_website,
             prepare_proxy,
             stop_proxy,
             download_subtitle,
+            prepare_video_material,
+            chat_video_materials,
+            export_video_materials,
+            create_video_export_directory,
             download_ppt,
             list_external_module_items,
             // Apis for jbox
             login_jbox,
             upload_file,
+            upload_file_as_pdf,
             // Annual Report
             generate_annual_report,
             // LLM
@@ -1349,7 +1455,7 @@ async fn main() -> Result<()> {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     rt.block_on(async {
                         APP.stop_mcp().await;
-                        APP.stop_proxy(None).await;
+                        APP.stop_proxy().await;
                         APP.stop_attendance_watch(None).await;
                     });
                 });

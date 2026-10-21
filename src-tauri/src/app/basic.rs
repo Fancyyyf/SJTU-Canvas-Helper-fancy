@@ -13,7 +13,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tauri::{Emitter, Runtime, Window};
 use tokio::{io::AsyncReadExt, process::Command as TokioCommand};
@@ -38,52 +38,45 @@ use super::{
 };
 
 const MY_CANVAS_FILES_FOLDER_NAME: &str = "我的Canvas文件";
-const MAX_LOG_READ_BYTES: usize = 4 * 1024 * 1024;
+
+fn canvas_stream_host(host: &str) -> bool {
+    host == "live.sjtu.edu.cn" || host.strip_prefix("mss")
+        .and_then(|rest| rest.strip_suffix(".sjtu.edu.cn"))
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn rewrite_live_playlist(playlist: &str, upstream: &str, proxy_origin: &str) -> String {
+    let Ok(base) = tauri::Url::parse(upstream) else { return playlist.to_string(); };
+    let rewrite = |uri: &str| -> String {
+        let Ok(url) = base.join(uri) else { return uri.to_string(); };
+        let Some(host) = url.host_str().filter(|host| canvas_stream_host(host)) else { return uri.to_string(); };
+        if url.scheme() != "https" || url.port_or_known_default() != Some(443) { return uri.to_string(); }
+        format!("{proxy_origin}/canvas-stream/{host}{}{}", url.path(),
+            url.query().map(|query| format!("?{query}")).unwrap_or_default())
+    };
+    let uri_attribute = regex::Regex::new(r#"URI="([^"]+)""#).unwrap();
+    playlist.lines().map(|line| {
+        if line.starts_with('#') {
+            uri_attribute.replace_all(line, |captures: &regex::Captures| format!("URI=\"{}\"", rewrite(&captures[1]))).into_owned()
+        } else if line.trim().is_empty() { line.to_string() }
+        else { rewrite(line.trim()) }
+    }).collect::<Vec<_>>().join("\n") + "\n"
+}
 
 async fn proxy_video_request(
-    trace_id: String,
-    route_name: &'static str,
-    upstream_base: &'static str,
+    upstream_base: &str,
     referer: &'static str,
     origin: &'static str,
     tail: warp::path::Tail,
     query: String,
     headers: warp::http::HeaderMap,
+    hls_proxy_origin: Option<String>,
 ) -> std::result::Result<Response<warp::hyper::Body>, Infallible> {
-    let started = Instant::now();
     let range_value = headers
         .get("Range")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let path = tail.as_str();
-    let path_segments = path.split('/').filter(|segment| !segment.is_empty()).count();
-    let extension = path
-        .rsplit('/')
-        .next()
-        .and_then(|segment| segment.rsplit_once('.').map(|(_, extension)| extension))
-        .unwrap_or("<none>");
-    let query_names = query
-        .split('&')
-        .filter_map(|pair| pair.split_once('=').map(|(name, _)| name).or(Some(pair)))
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>()
-        .join(",");
-
-    tracing::info!(
-        %trace_id,
-        route = route_name,
-        method = "GET",
-        path_segments,
-        extension,
-        query_names = if query_names.is_empty() { "<none>" } else { &query_names },
-        range = if range_value.is_empty() { "<none>" } else { &range_value },
-        origin = headers
-            .get("origin")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("<missing>"),
-        "Video proxy inbound request"
-    );
 
     let mut url = format!("{upstream_base}/{}", tail.as_str());
     if !query.is_empty() {
@@ -109,37 +102,20 @@ async fn proxy_video_request(
     match request.send().await {
         Ok(response) => {
             let status = response.status();
-            let content_type = response
-                .headers()
-                .get("content-type")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<missing>")
-                .to_owned();
-            let has_content_range = response.headers().contains_key("content-range");
-            let content_length = response
-                .headers()
-                .get("content-length")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<missing>")
-                .to_owned();
-            let content_range = response
-                .headers()
-                .get("content-range")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<missing>")
-                .to_owned();
-            tracing::info!(
-                %trace_id,
-                route = route_name,
-                upstream = upstream_base,
-                %status,
-                %content_type,
-                has_content_range,
-                %content_length,
-                %content_range,
-                elapsed_ms = started.elapsed().as_millis(),
-                "Video proxy upstream response"
-            );
+            if status.is_success() && tail.as_str().ends_with(".m3u8") {
+                if let Some(proxy_origin) = hls_proxy_origin {
+                    return match response.text().await {
+                        Ok(playlist) => Ok(Response::builder().status(status)
+                            .header("Content-Type", "application/vnd.apple.mpegurl")
+                            .header("Cache-Control", "no-store")
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(rewrite_live_playlist(&playlist, &url, &proxy_origin).into()).unwrap()),
+                        Err(_) => Ok(Response::builder().status(StatusCode::BAD_GATEWAY)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body("Failed to read live playlist".into()).unwrap()),
+                    };
+                }
+            }
             let mut builder = Response::builder().status(status);
             for (key, value) in response.headers() {
                 if key.as_str() != TE.as_str()
@@ -152,6 +128,8 @@ async fn proxy_video_request(
                             | "trailer"
                             | "transfer-encoding"
                             | "upgrade"
+                            | "access-control-allow-origin"
+                            | "access-control-expose-headers"
                     )
                 {
                     builder = builder.header(key, value);
@@ -167,36 +145,20 @@ async fn proxy_video_request(
             let body = warp::hyper::Body::wrap_stream(stream);
             Ok(builder.body(body).unwrap())
         }
-        Err(error) => {
-            tracing::error!(
-                %trace_id,
-                route = route_name,
-                upstream = upstream_base,
-                error = %error,
-                elapsed_ms = started.elapsed().as_millis(),
-                "Video proxy upstream request failed"
-            );
-            Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("Access-Control-Allow-Origin", "*")
-                .header("Access-Control-Allow-Private-Network", "true")
-                .body("Video upstream request failed".into())
-                .unwrap())
-        }
+        Err(error) => Ok(Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(if hls_proxy_origin.is_some() { "Error connecting to live media".to_string() } else { format!("Error downloading video: {error}") }.into())
+            .unwrap()),
     }
 }
 
 impl App {
     fn ensure_directory(dir: &str) {
         let metadata = fs::metadata(dir);
+        tracing::info!("dir: {:?}", dir);
         if metadata.is_err() {
-            match fs::create_dir_all(dir) {
-                Ok(()) => tracing::debug!("Application directory created"),
-                Err(error) => tracing::warn!(
-                    error = %crate::diagnostics::sanitize_text(&error.to_string()),
-                    "Unable to create application directory"
-                ),
-            }
+            _ = fs::create_dir_all(dir);
         }
     }
 
@@ -225,23 +187,6 @@ impl App {
             let config_dir = config_dir().unwrap().join("SJTU-Canvas-Helper");
             Ok(config_dir.to_str().unwrap().to_owned())
         }
-    }
-
-    pub fn read_system_settings() -> Result<SystemSettings> {
-        let settings_path = Path::new(&App::config_dir()?).join("system_settings.json");
-        match fs::read(settings_path) {
-            Ok(content) => Ok(utils::json::parse_json(&content)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(SystemSettings::default())
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub fn save_system_settings(settings: &SystemSettings) -> Result<()> {
-        let settings_path = Path::new(&App::config_dir()?).join("system_settings.json");
-        fs::write(settings_path, serde_json::to_vec(settings)?)?;
-        Ok(())
     }
 
     fn save_account_info(account: &AccountInfo) -> Result<()> {
@@ -325,12 +270,11 @@ impl App {
         if !App::account_exists(account)? {
             return Err(AppError::AccountNotExists);
         }
-        self.stop_attendance_watch(None).await;
         let config_path = App::get_config_path(account);
         let config = App::read_config_from_file(&config_path)?;
         let base_url = Self::get_base_url(&config.account_type);
         self.client.set_base_url(base_url).await;
-        Self::apply_llm_config(&config, &self.client).await;
+        Self::apply_llm_config(&config, &self.client).await?;
         self.client.set_debug_mode(config.debug_mode);
         *self.config.write().await = config;
 
@@ -365,25 +309,14 @@ impl App {
                 account
             }
         };
-        tracing::debug!(
-            account_count = account_info.all_accounts.len(),
-            "Account registry loaded"
-        );
+        tracing::info!("Read current account: {:?}", account_info);
         let config_path = App::get_config_path(&account_info.current_account);
-        tracing::debug!("Active account configuration selected");
+        tracing::info!("Read config path: {}", config_path);
         let config = App::read_config_from_file(&config_path).unwrap_or_default();
 
         let canvas_base_url = Self::get_base_url(&config.account_type);
-        let api_key = Self::resolve_active_api_key(&config);
-        let llm_base_url = Self::resolve_active_base_url(&config);
-        let llm_model = Self::resolve_active_model(&config);
-        let client = Client::new(
-            canvas_base_url,
-            &api_key,
-            &llm_base_url,
-            &llm_model,
-            config.llm_temperature,
-        );
+        let llm_config = crate::client::EffectiveLlmConfig::from_app_config(&config);
+        let client = Client::new_with_llm_config(canvas_base_url, llm_config);
         client.set_debug_mode(config.debug_mode);
 
         Self {
@@ -398,11 +331,28 @@ impl App {
         }
     }
 
+    pub fn read_system_settings() -> Result<SystemSettings> {
+        let path = Path::new(&Self::config_dir()?).join("system_settings.json");
+        match fs::read(path) {
+            Ok(content) => Ok(utils::json::parse_json(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SystemSettings::default())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_system_settings(settings: &SystemSettings) -> Result<()> {
+        let path = Path::new(&Self::config_dir()?).join("system_settings.json");
+        fs::write(path, serde_json::to_vec(settings)?)?;
+        Ok(())
+    }
+
     pub async fn init(&self) -> Result<()> {
         let mut config = self.get_config().await;
         let cookies = &config.video_cookies;
         if !cookies.is_empty() {
-            tracing::info!(cookie_present = true, cookie_length = cookies.len(), "Detected saved video cookies");
+            tracing::info!("Detected saved cookies: {}", cookies);
             self.client.init_cookie(cookies);
             if let Ok(Some(consumer_key)) = self.client.get_oauth_consumer_key().await {
                 config.oauth_consumer_key = consumer_key;
@@ -412,108 +362,62 @@ impl App {
         Ok(())
     }
 
-    async fn wait_proxy_ready(&self, proxy_port: u16, trace_id: &str) -> Result<bool> {
-        let url = format!("http://127.0.0.1:{proxy_port}/ready");
+    async fn wait_proxy_ready(&self, proxy_port: u16) -> Result<bool> {
+        let url = format!("http://localhost:{proxy_port}/ready");
+        let client = reqwest::Client::builder().no_proxy().build()?;
         let timeout_cnt = 10;
         let mut cnt = 0;
-        let started = Instant::now();
         loop {
-            match reqwest::get(&url).await {
-                Ok(response) if response.status() == 200 => {
-                    tracing::info!(
-                        %trace_id,
-                        proxy_port,
-                        attempts = cnt + 1,
-                        elapsed_ms = started.elapsed().as_millis(),
-                        "Video proxy ready check succeeded"
-                    );
-                    break Ok(true);
-                }
-                Ok(response) => tracing::warn!(
-                    %trace_id,
-                    proxy_port,
-                    attempt = cnt + 1,
-                    status = %response.status(),
-                    "Video proxy ready check returned unexpected status"
-                ),
-                Err(error) => tracing::warn!(
-                    %trace_id,
-                    proxy_port,
-                    attempt = cnt + 1,
-                    error = %error,
-                    "Video proxy ready check connection failed"
-                ),
+            if client.get(&url).send().await.is_ok_and(|response| response.status() == 200) {
+                tracing::info!("Proxy ready check success");
+                break Ok(true);
             }
             cnt += 1;
             if cnt >= timeout_cnt {
-                tracing::error!(
-                    %trace_id,
-                    proxy_port,
-                    attempts = cnt,
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "Video proxy ready check timed out"
-                );
+                tracing::info!("Proxy ready check timeout");
                 break Ok(false);
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    pub async fn prepare_proxy(&self, trace_id: Option<&str>) -> Result<bool> {
-        let trace_id = trace_id.unwrap_or("unscoped");
-        tracing::info!(%trace_id, "Video proxy prepare requested");
-        {
-            let mut handle = self.handle.write().await;
-            if let Some(proxy) = handle.as_ref() {
-                if !proxy.is_finished() {
-                    let proxy_port = self.config.read().await.proxy_port;
-                    tracing::info!(%trace_id, proxy_port, "Video proxy reused existing server");
-                    return Ok(true);
-                }
-                tracing::warn!(%trace_id, "Video proxy task had exited; restarting");
-                *handle = None;
-            }
+    pub async fn prepare_proxy(&self) -> Result<bool> {
+        // Serialize startup so live and recording requests cannot bind the same port twice.
+        let mut proxy_handle = self.handle.write().await;
+        if proxy_handle.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            return Ok(true);
         }
         let proxy_port = self.config.read().await.proxy_port;
-        tracing::info!(%trace_id, proxy_port, bind = "127.0.0.1", "Video proxy starting");
 
-        // The first two path segments are a fixed route and a playback trace
-        // id. The remaining path is forwarded unchanged to the allow-listed
-        // upstream host, so source paths do not need to begin with `/vod`.
-        let live_video_proxy = warp::get()
-            .and(warp::path("live-media"))
-            .and(warp::path::param::<String>())
-            .and(warp::path::tail())
+        // Proxy Endpoint: /vod/*
+        let legacy_video_proxy = warp::get()
+            .and(warp::path("vod").and(warp::path::tail()))
             .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
             .and(warp::header::headers_cloned())
-            .and_then(|trace_id, tail, query, headers| {
+            .and_then(|tail, query, headers| {
                 proxy_video_request(
-                    trace_id,
-                    "live-media",
-                    "https://live.sjtu.edu.cn",
+                    "https://live.sjtu.edu.cn/vod",
                     "https://courses.sjtu.edu.cn",
                     "https://courses.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
+                    None,
                 )
             });
         let canvas_video_proxy = warp::get()
-            .and(warp::path("canvas-media"))
-            .and(warp::path::param::<String>())
-            .and(warp::path::tail())
+            .and(warp::path("canvas-vod").and(warp::path::tail()))
             .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
             .and(warp::header::headers_cloned())
-            .and_then(|trace_id, tail, query, headers| {
+            .and_then(|tail, query, headers| {
                 proxy_video_request(
-                    trace_id,
-                    "canvas-media",
                     "https://videos.sjtu.edu.cn/vod",
                     "https://v.sjtu.edu.cn/",
                     "https://v.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
+                    None,
                 )
             });
         let legacy_canvas_video_proxy = warp::get()
@@ -522,14 +426,13 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|tail, query, headers| {
                 proxy_video_request(
-                    "unscoped".to_string(),
-                    "legacy-vod",
                     "https://videos.sjtu.edu.cn/vod",
                     "https://courses.sjtu.edu.cn/",
                     "https://courses.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
+                    None,
                 )
             });
         let canvas_live_proxy = warp::get()
@@ -538,112 +441,54 @@ impl App {
             .and(warp::header::headers_cloned())
             .and_then(|tail, query, headers| {
                 proxy_video_request(
-                    "unscoped".to_string(),
-                    "canvas-live",
                     "https://live.sjtu.edu.cn",
                     "https://v.sjtu.edu.cn/",
                     "https://v.sjtu.edu.cn",
                     tail,
                     query,
                     headers,
+                    None,
                 )
             });
-        // 直播：上游 mss2 的 HTTP-FLV（本校直播取流）。写法与上面两条一致。
-        let mss_live_proxy = warp::get()
-            .and(warp::path("mss-live"))
+        let canvas_stream_proxy = warp::get()
+            .and(warp::path("canvas-stream"))
             .and(warp::path::param::<String>())
             .and(warp::path::tail())
             .and(query_raw().or(warp::any().map(|| "".to_string())).unify())
             .and(warp::header::headers_cloned())
-            .and_then(|trace_id, tail, query, headers| {
-                proxy_video_request(
-                    trace_id,
-                    "mss-live",
-                    "https://mss2.sjtu.edu.cn",
-                    "https://v.sjtu.edu.cn/jy-application-resourcemanage-ui/",
-                    "https://v.sjtu.edu.cn",
-                    tail,
-                    query,
-                    headers,
-                )
+            .and_then(move |host: String, tail, query, headers| async move {
+                if !canvas_stream_host(&host) {
+                    return Ok::<_, Infallible>(Response::builder().status(StatusCode::BAD_REQUEST)
+                        .header("Access-Control-Allow-Origin", "*").body("Unsupported live media host".into()).unwrap());
+                }
+                proxy_video_request(&format!("https://{host}"), "https://v.sjtu.edu.cn/",
+                    "https://v.sjtu.edu.cn", tail, query, headers,
+                    Some(format!("http://localhost:{proxy_port}"))).await
             });
-        // WebView2 may preflight loopback requests before sending a Range GET.
-        // Without an explicit OPTIONS response the browser reports only a
-        // generic TypeError and never reaches either video route.
-        let proxy_preflight =
-            warp::options()
-                .and(warp::path::full())
-                .map(|path: warp::path::FullPath| {
-                    let mut segments = path
-                        .as_str()
-                        .trim_start_matches('/')
-                        .split('/')
-                        .filter(|segment| !segment.is_empty());
-                    let route = segments.next().unwrap_or("<missing>");
-                    let trace_id = segments.next().unwrap_or("unscoped");
-                    tracing::info!(
-                        %trace_id,
-                        route,
-                        path_segments = segments.count() + 2,
-                        "Video proxy CORS preflight"
-                    );
-                    Response::builder()
-                        .status(StatusCode::NO_CONTENT)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-                        .header(
-                            "Access-Control-Allow-Headers",
-                            "Range, Accept, Content-Type",
-                        )
-                        .header("Access-Control-Allow-Private-Network", "true")
-                        .header("Access-Control-Max-Age", "600")
-                        .body(warp::hyper::Body::empty())
-                        .unwrap()
-                });
         // Ready Check Endpoint: /ready
         let ready_check = warp::path!("ready").map(|| Response::builder().body(""));
-        let proxy_not_found = warp::any()
-            .and(warp::method())
-            .and(warp::path::full())
-            .map(|method: warp::http::Method, path: warp::path::FullPath| {
-                tracing::warn!(
-                    method = %method,
-                    path = path.as_str(),
-                    "Video proxy route not found"
-                );
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .header("Access-Control-Allow-Private-Network", "true")
-                    .body(warp::hyper::Body::from("Video proxy route not found"))
-                    .unwrap()
-            });
 
-        let routes = live_video_proxy
+        let routes = legacy_video_proxy
             .or(legacy_canvas_video_proxy)
             .or(canvas_video_proxy)
             .or(canvas_live_proxy)
-            .or(mss_live_proxy)
-            .or(proxy_preflight)
+            .or(canvas_stream_proxy)
             .or(ready_check);
-        let handle = tokio::spawn(warp::serve(routes).run(([127, 0, 0, 1], proxy_port)));
-        *self.handle.write().await = Some(handle);
-
-        self.wait_proxy_ready(proxy_port, trace_id).await
+        let (_, server) = warp::serve(routes).try_bind_ephemeral(([127, 0, 0, 1], proxy_port))
+            .map_err(|_| AppError::VideoDownloadError(format!("播放代理端口 {proxy_port} 无法使用，请检查端口是否被占用")))?;
+        *proxy_handle = Some(tokio::spawn(server));
+        let ready = self.wait_proxy_ready(proxy_port).await;
+        if !matches!(ready, Ok(true)) {
+            if let Some(handle) = proxy_handle.take() { handle.abort(); }
+        }
+        ready
     }
 
-    pub async fn stop_proxy(&self, trace_id: Option<&str>) {
-        let trace_id = trace_id.unwrap_or("unscoped");
+    pub async fn stop_proxy(&self) {
         let mut handle = self.handle.write().await;
         if let Some(handle) = handle.as_ref() {
-            tracing::info!(
-                %trace_id,
-                task_finished = handle.is_finished(),
-                "Video proxy stopping"
-            );
+            tracing::info!("stop proxy");
             handle.abort();
-        } else {
-            tracing::info!(%trace_id, "Video proxy stop requested with no active server");
         }
         *handle = None;
     }
@@ -697,34 +542,7 @@ impl App {
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
         let content = fs::read_to_string(config_path)?;
-        let mut value: serde_json::Value = serde_json::from_str(&content)?;
-        fn redact(value: &mut serde_json::Value) {
-            match value {
-                serde_json::Value::Object(entries) => {
-                    for (key, child) in entries {
-                        if matches!(
-                            key.as_str(),
-                            "token"
-                                | "key"
-                                | "llm_api_key"
-                                | "ja_auth_cookie"
-                                | "attendance_password"
-                                | "video_cookies"
-                                | "oauth_consumer_key"
-                                | "access_token"
-                        ) {
-                            *child = serde_json::Value::String("<redacted>".to_owned());
-                        } else {
-                            redact(child);
-                        }
-                    }
-                }
-                serde_json::Value::Array(values) => values.iter_mut().for_each(redact),
-                _ => {}
-            }
-        }
-        redact(&mut value);
-        Ok(serde_json::to_string_pretty(&value)?)
+        Ok(content)
     }
 
     pub async fn list_courses(&self) -> Result<Vec<Course>> {
@@ -944,6 +762,13 @@ impl App {
         self.client.list_course_files(course_id, &token).await
     }
 
+    pub async fn get_file_preview_session_url(&self, file_id: i64) -> Result<String> {
+        let token = self.config.read().await.token.clone();
+        self.client
+            .get_file_preview_session_url(file_id, &token)
+            .await
+    }
+
     pub async fn list_course_images(&self, course_id: i64) -> Result<Vec<File>> {
         let token = self.config.read().await.token.clone();
         self.client.list_course_images(course_id, &token).await
@@ -999,12 +824,7 @@ impl App {
                         results.push(scan_result);
                     }
                 }
-                Err(err) => tracing::warn!(
-                    code = "QRCODE.IMAGE_SCAN_SKIPPED",
-                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
-                    fallback = "continue_with_remaining_images",
-                    "QR code image scan failed"
-                ),
+                Err(err) => tracing::error!("{:?}", err),
             }
         }
         Ok(results)
@@ -1109,7 +929,7 @@ impl App {
             .join(folder_path);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::debug!(file_name = %file.display_name, "Course file download requested");
+        tracing::info!("Download file at path: {:?}", save_path);
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
@@ -1129,10 +949,35 @@ impl App {
             .join(folder_path);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::debug!(file_name = %file.display_name, "Personal file download requested");
+        tracing::info!("Download file at path: {:?}", save_path);
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
+        Ok(())
+    }
+
+    pub async fn download_course_file_as_pdf(
+        &self,
+        file: &File,
+        course: &Course,
+        folder_path: &str,
+    ) -> Result<()> {
+        let (pdf_name, pdf_content) = self.convert_office_file_to_pdf(file).await?;
+        let save_path = Path::new(&self.config.read().await.save_path)
+            .join(self.get_course_identifier(course))
+            .join(folder_path);
+        fs::create_dir_all(&save_path)?;
+        fs::write(save_path.join(pdf_name), pdf_content)?;
+        Ok(())
+    }
+
+    pub async fn download_my_file_as_pdf(&self, file: &File, folder_path: &str) -> Result<()> {
+        let (pdf_name, pdf_content) = self.convert_office_file_to_pdf(file).await?;
+        let save_path = Path::new(&self.config.read().await.save_path)
+            .join(MY_CANVAS_FILES_FOLDER_NAME)
+            .join(folder_path);
+        fs::create_dir_all(&save_path)?;
+        fs::write(save_path.join(pdf_name), pdf_content)?;
         Ok(())
     }
 
@@ -1176,6 +1021,16 @@ impl App {
             .join(folder_path)
             .join(name);
         self.open_path(path.to_str().unwrap_or_default())
+    }
+
+    pub fn open_local_path(&self, path: &str) -> Result<()> {
+        let local = Path::new(path);
+        if !local.is_absolute() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "请选择本地文件或目录的绝对路径").into());
+        }
+        // Check existence before handing the path to the system file opener.
+        std::fs::metadata(local)?;
+        self.open_path(path)
     }
 
     fn open_path(&self, path: &str) -> Result<()> {
@@ -1268,42 +1123,15 @@ impl App {
             .await
     }
 
-    fn resolve_active_key_entry(config: &AppConfig) -> Option<&LlmApiKeyEntry> {
-        if config.llm_active_api_key.is_empty() {
-            return None;
-        }
-        config.llm_api_keys.iter().find(|e| e.name == config.llm_active_api_key)
-    }
-
-    fn resolve_active_api_key(config: &AppConfig) -> String {
-        Self::resolve_active_key_entry(config)
-            .filter(|e| !e.key.is_empty())
-            .map(|e| e.key.clone())
-            .unwrap_or_else(|| config.llm_api_key.clone())
-    }
-
-    fn resolve_active_base_url(config: &AppConfig) -> String {
-        Self::resolve_active_key_entry(config)
-            .filter(|e| !e.base_url.is_empty())
-            .map(|e| e.base_url.clone())
-            .unwrap_or_else(|| config.llm_base_url.clone())
-    }
-
-    fn resolve_active_model(config: &AppConfig) -> String {
-        Self::resolve_active_key_entry(config)
-            .filter(|e| !e.model.is_empty())
-            .map(|e| e.model.clone())
-            .unwrap_or_else(|| config.llm_model.clone())
-    }
-
-    async fn apply_llm_config(config: &AppConfig, client: &Client) {
-        client.set_llm_api_key(&Self::resolve_active_api_key(config)).await;
-        client.set_llm_base_url(&Self::resolve_active_base_url(config)).await;
-        client.set_llm_model(&Self::resolve_active_model(config)).await;
-        client.set_llm_temperature(config.llm_temperature).await;
+    async fn apply_llm_config(config: &AppConfig, client: &Client) -> Result<()> {
+        client
+            .reconfigure_llm(crate::client::EffectiveLlmConfig::from_app_config(config))
+            .await
     }
 
     pub async fn save_config(&self, config: AppConfig) -> Result<()> {
+        crate::model::VideoSummaryOptions { prompt: config.video_summary_prompt.clone(),
+            context_tokens: config.video_summary_context_tokens, output_tokens: config.video_summary_output_tokens }.validate()?;
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
         fs::write(&config_path, serde_json::to_vec(&config).unwrap())?;
@@ -1311,7 +1139,7 @@ impl App {
         if self.client.set_base_url(base_url).await {
             self.invalidate_cache()?;
         }
-        Self::apply_llm_config(&config, &self.client).await;
+        Self::apply_llm_config(&config, &self.client).await?;
         self.client.set_debug_mode(config.debug_mode);
         let was_enabled = self.config.read().await.mcp_enabled;
         *self.config.write().await = config;
@@ -1338,6 +1166,10 @@ impl App {
 
     pub async fn chat<S: Into<String>>(&self, prompt: S) -> Result<String> {
         self.client.chat(prompt).await
+    }
+
+    pub(crate) async fn llm_snapshot(&self) -> Result<crate::client::LlmSnapshot> {
+        self.client.llm_snapshot().await
     }
 
     pub async fn explain_file(&self, file: &File) -> Result<String> {
@@ -1470,171 +1302,286 @@ impl App {
         Ok(())
     }
 
+    fn try_convert_with_libreoffice(
+        &self,
+        input_path: &Path,
+        pdf_path: &Path,
+    ) -> std::result::Result<(), String> {
+        #[cfg(target_os = "windows")]
+        let candidates = [
+            "soffice.exe",
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ];
+        #[cfg(target_os = "macos")]
+        let candidates = [
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+            "soffice",
+        ];
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let candidates = ["libreoffice", "soffice"];
+
+        let output_dir = pdf_path
+            .parent()
+            .ok_or_else(|| "无法确定 PDF 输出目录".to_owned())?;
+        let generated_pdf_path = output_dir
+            .join(
+                input_path
+                    .file_stem()
+                    .ok_or_else(|| "无法确定源文件名".to_owned())?,
+            )
+            .with_extension("pdf");
+        let mut errors = Vec::new();
+
+        for candidate in candidates {
+            match Command::new(candidate)
+                .args(["--headless", "--convert-to", "pdf", "--outdir"])
+                .arg(output_dir)
+                .arg(input_path)
+                .output()
+            {
+                Ok(output) if output.status.success() && generated_pdf_path.exists() => {
+                    if generated_pdf_path != pdf_path {
+                        fs::rename(&generated_pdf_path, pdf_path)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    return Ok(());
+                }
+                Ok(output) => errors.push(format!(
+                    "{candidate}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(error) => errors.push(format!("{candidate}: {error}")),
+            }
+        }
+
+        Err(errors.join("; "))
+    }
+
     #[cfg(target_os = "macos")]
     fn convert_pptx_to_pdf_inner(&self, pptx_path: &Path, pdf_path: &Path) -> Result<()> {
-        // Reference https://github.com/jeongwhanchoi/convert-ppt-to-pdf
-        process::Command::new("osascript")
+        if self
+            .try_convert_with_libreoffice(pptx_path, pdf_path)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let output = process::Command::new("osascript")
             .arg("-e")
             .arg(
                 r#"on run {input, output}
-            tell application "Microsoft PowerPoint" -- work on version 15.15 or newer
-                launch
-                set t to input as string
-                set pptx to input as POSIX file
-                if t ends with ".ppt" or t ends with ".pptx" then
-                    set pdfPath to output as POSIX file as string
-                    open pptx
-                    save active presentation in pdfPath as save as PDF -- save in same folder
-                end if
-            end tell
-            tell application "Microsoft PowerPoint" -- work on version 15.15 or newer
-                quit
-            end tell
-        end run"#,
+                    tell application "Microsoft PowerPoint"
+                        launch
+                        set pptx to input as POSIX file
+                        set pdfPath to output as POSIX file as string
+                        open pptx
+                        save active presentation in pdfPath as save as PDF
+                        close active presentation saving no
+                    end tell
+                end run"#,
             )
             .arg(pptx_path)
             .arg(pdf_path)
             .output()?;
-
+        if !output.status.success() || !pdf_path.exists() {
+            return Err(AppError::DocumentConversion(format!(
+                "PowerPoint/LibreOffice 均无法完成转换：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         Ok(())
     }
 
     #[cfg(target_os = "macos")]
     fn convert_docx_to_pdf_inner(&self, docx_path: &Path, pdf_path: &Path) -> Result<()> {
-        process::Command::new("osascript")
+        if self
+            .try_convert_with_libreoffice(docx_path, pdf_path)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let output = process::Command::new("osascript")
             .arg("-e")
             .arg(
                 r#"on run {input, output}
                     tell application "Microsoft Word"
                         launch
-                        set t to input as string
                         set docx to input as POSIX file
-                        if t ends with ".doc" or t ends with ".docx" then
-                            set pdfPath to output as POSIX file as string
-                            open docx
-                            set activeDoc to active document
-                            save as activeDoc file name pdfPath file format format PDF
-                        end if
-                    end tell
-                    tell application "Microsoft Word"
-                        quit
+                        set pdfPath to output as POSIX file as string
+                        open docx
+                        set activeDoc to active document
+                        save as activeDoc file name pdfPath file format format PDF
+                        close activeDoc saving no
                     end tell
                 end run"#,
             )
-            .arg(docx_path.as_os_str().to_str().unwrap())
-            .arg(pdf_path.as_os_str().to_str().unwrap())
+            .arg(docx_path)
+            .arg(pdf_path)
             .output()?;
+        if !output.status.success() || !pdf_path.exists() {
+            return Err(AppError::DocumentConversion(format!(
+                "Word/LibreOffice 均无法完成转换：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     fn convert_docx_to_pdf_inner(&self, docx_path: &Path, pdf_path: &Path) -> Result<()> {
-        match process::Command::new("powershell.exe")
-            .arg("-Command")
-            .arg(format!(r#"$word_app = New-Object -ComObject Word.Application; $document = $word_app.Documents.Open('{}'); $pdf_filename = '{}'; $opt= [Microsoft.Office.Interop.Word.WdSaveFormat]::wdFormatPDF; $document.SaveAs($pdf_filename, $opt); $document.Close(); $word_app.Quit();"#,
-        docx_path.to_str().unwrap(), pdf_path.to_str().unwrap()))
-            .output() {
-            Ok(output) => {
-                if !output.status.success() {
-                    let error_msg = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!(
-                        code = "FILE.DOCX_TO_PDF_FAILED",
-                        status = ?output.status,
-                        error = %crate::diagnostics::sanitize_text(&error_msg),
-                        "DOCX to PDF conversion failed"
-                    );
-                    return Err(AppError::FunctionUnsupported);
-                }
-            },
-            Err(err) => {
-                tracing::error!(
-                    code = "FILE.DOCX_CONVERTER_LAUNCH_FAILED",
-                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
-                    "Unable to launch DOCX converter"
-                );
-                return Err(err.into());
-            }
-        };
+        if self
+            .try_convert_with_libreoffice(docx_path, pdf_path)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let input = docx_path.to_string_lossy().replace('\'', "''");
+        let output_path = pdf_path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+$wordApp = $null
+$document = $null
+try {{
+    $wordApp = New-Object -ComObject Word.Application
+    $wordApp.Visible = $false
+    $document = $wordApp.Documents.Open('{input}', $false, $true)
+    $document.ExportAsFixedFormat('{output_path}', 17)
+}} finally {{
+    if ($null -ne $document) {{ $document.Close($false) }}
+    if ($null -ne $wordApp) {{ $wordApp.Quit() }}
+}}"#
+        );
+        let output = process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .output()?;
+        if !output.status.success() || !pdf_path.exists() {
+            return Err(AppError::DocumentConversion(format!(
+                "Word/LibreOffice 均无法完成转换：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn convert_docx_to_pdf_inner(&self, _: &Path, _: &Path) -> Result<()> {
-        Err(AppError::FunctionUnsupported)
+    fn convert_docx_to_pdf_inner(&self, docx_path: &Path, pdf_path: &Path) -> Result<()> {
+        self.try_convert_with_libreoffice(docx_path, pdf_path)
+            .map_err(|error| {
+                AppError::DocumentConversion(format!(
+                    "需要安装 LibreOffice 才能转换 Word 文件：{error}"
+                ))
+            })
     }
 
     #[cfg(target_os = "windows")]
     fn convert_pptx_to_pdf_inner(&self, pptx_path: &Path, pdf_path: &Path) -> Result<()> {
-        match process::Command::new("powershell.exe")
-            .arg("-Command")
-            .arg(format!(r#"$ppt_app = New-Object -ComObject PowerPoint.Application; $document = $ppt_app.Presentations.Open('{}'); $pdf_filename = '{}'; $opt= [Microsoft.Office.Interop.PowerPoint.PpSaveAsFileType]::ppSaveAsPDF; $document.SaveAs($pdf_filename, $opt); $document.Close(); $ppt_app.Quit();"#,
-        pptx_path.to_str().unwrap(), pdf_path.to_str().unwrap()))
-            .output() {
-            Ok(output) => {
-                if !output.status.success() {
-                    let error_msg = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!(
-                        code = "FILE.PPTX_TO_PDF_FAILED",
-                        status = ?output.status,
-                        error = %crate::diagnostics::sanitize_text(&error_msg),
-                        "PPTX to PDF conversion failed"
-                    );
-                    return Err(AppError::FunctionUnsupported);
-                }
-            },
-            Err(err) => {
-                tracing::error!(
-                    code = "FILE.PPTX_CONVERTER_LAUNCH_FAILED",
-                    error = %crate::diagnostics::sanitize_text(&err.to_string()),
-                    "Unable to launch PPTX converter"
-                );
-                return Err(err.into());
-            }
-        };
+        if self
+            .try_convert_with_libreoffice(pptx_path, pdf_path)
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let input = pptx_path.to_string_lossy().replace('\'', "''");
+        let output_path = pdf_path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            r#"$ErrorActionPreference = 'Stop'
+$powerPointApp = $null
+$presentation = $null
+try {{
+    $powerPointApp = New-Object -ComObject PowerPoint.Application
+    $presentation = $powerPointApp.Presentations.Open('{input}', $true, $false, $false)
+    $presentation.SaveAs('{output_path}', 32)
+}} finally {{
+    if ($null -ne $presentation) {{ $presentation.Close() }}
+    if ($null -ne $powerPointApp) {{ $powerPointApp.Quit() }}
+}}"#
+        );
+        let output = process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .output()?;
+        if !output.status.success() || !pdf_path.exists() {
+            return Err(AppError::DocumentConversion(format!(
+                "PowerPoint/LibreOffice 均无法完成转换：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
         Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn convert_pptx_to_pdf_inner(&self, _: &Path, _: &Path) -> Result<()> {
-        Err(AppError::FunctionUnsupported)
+    fn convert_pptx_to_pdf_inner(&self, pptx_path: &Path, pdf_path: &Path) -> Result<()> {
+        self.try_convert_with_libreoffice(pptx_path, pdf_path)
+            .map_err(|error| {
+                AppError::DocumentConversion(format!(
+                    "需要安装 LibreOffice 才能转换 PowerPoint 文件：{error}"
+                ))
+            })
+    }
+
+    fn pdf_file_name(file_name: &str) -> Result<String> {
+        let path = Path::new(file_name);
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| AppError::DocumentConversion("无法识别源文件名".to_owned()))?;
+        Ok(format!("{stem}.pdf"))
+    }
+
+    pub async fn convert_office_file_to_pdf(&self, file: &File) -> Result<(String, Vec<u8>)> {
+        let extension = Path::new(&file.display_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_lowercase)
+            .ok_or_else(|| AppError::UnsupportedFileExtensionError(file.display_name.clone()))?;
+        if !matches!(extension.as_str(), "doc" | "docx" | "ppt" | "pptx") {
+            return Err(AppError::UnsupportedFileExtensionError(extension));
+        }
+
+        let temp_dir = std::env::temp_dir()
+            .join("sjtu-canvas-helper")
+            .join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&temp_dir)?;
+        let input_path = temp_dir.join(format!("source.{extension}"));
+        let pdf_path = temp_dir.join("source.pdf");
+        let pdf_name = Self::pdf_file_name(&file.display_name)?;
+        let token = self.config.read().await.token.clone();
+        let mut temp_file = file.clone();
+        temp_file.display_name = format!("source.{extension}");
+
+        let result = async {
+            let temp_dir_string = temp_dir.to_string_lossy().into_owned();
+            self.client
+                .download_file(&temp_file, &token, &temp_dir_string, |_| {})
+                .await?;
+            if matches!(extension.as_str(), "doc" | "docx") {
+                self.convert_docx_to_pdf_inner(&input_path, &pdf_path)?;
+            } else {
+                self.convert_pptx_to_pdf_inner(&input_path, &pdf_path)?;
+            }
+            Ok((pdf_name, fs::read(&pdf_path)?))
+        }
+        .await;
+
+        if let Err(error) = fs::remove_dir_all(&temp_dir) {
+            tracing::warn!("Failed to remove conversion temp directory: {error}");
+        }
+        result
     }
 
     pub async fn convert_pptx_to_pdf(&self, file: &mut File) -> Result<Vec<u8>> {
-        let config = self.config.read().await;
-        let token = &config.token.clone();
-        let save_dir = &config.save_path.clone();
-        let out_file_name = file.display_name.replace("pptx", "pdf");
-        let tmp_file_name = format!("tmp_{}.pptx", Uuid::new_v4());
-        let pptx_path = Path::new(save_dir).join(&tmp_file_name);
-        let pdf_path = Path::new(save_dir).join(&out_file_name);
-        file.display_name = tmp_file_name;
-        self.client
-            .download_file(file, token, save_dir, |_| {})
-            .await?;
-        self.convert_pptx_to_pdf_inner(&pptx_path, &pdf_path)?;
-        fs::remove_file(&pptx_path)?;
-        let pdf_content = fs::read(&pdf_path)?;
-        fs::remove_file(&pdf_path)?;
-        Ok(pdf_content)
+        let (_, content) = self.convert_office_file_to_pdf(file).await?;
+        Ok(content)
     }
 
     pub async fn convert_docx_to_pdf(&self, file: &mut File) -> Result<Vec<u8>> {
-        let config = self.config.read().await;
-        let token = &config.token.clone();
-        let save_dir = &config.save_path.clone();
-        let out_file_name = file.display_name.replace("docx", "pdf");
-        let tmp_file_name = format!("tmp_{}.docx", Uuid::new_v4());
-        let docx_path = Path::new(save_dir).join(&tmp_file_name);
-        let pdf_path = Path::new(save_dir).join(&out_file_name);
-        file.display_name = tmp_file_name;
-        self.client
-            .download_file(file, token, save_dir, |_| {})
-            .await?;
-        self.convert_docx_to_pdf_inner(&docx_path, &pdf_path)?;
-        fs::remove_file(&docx_path)?;
-        let pdf_content = fs::read(&pdf_path)?;
-        fs::remove_file(&pdf_path)?;
-        Ok(pdf_content)
+        let (_, content) = self.convert_office_file_to_pdf(file).await?;
+        Ok(content)
     }
 
     pub fn is_ffmpeg_installed() -> bool {
@@ -1720,12 +1667,54 @@ impl App {
     pub fn read_log_content() -> Result<String> {
         let log_file_path = App::config_dir()?;
         let path = Path::new(&log_file_path).join("app.log");
-        let content = match fs::read(path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
-            Err(error) => return Err(error.into()),
+        let content = fs::read_to_string(path)?;
+        Ok(content)
+    }
+}
+
+#[cfg(test)]
+mod live_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn live_playlist_rewrites_segments_variants_keys_and_maps() {
+        let playlist = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin?key=signed\"\n#EXT-X-MAP:URI=\"/live/init.mp4\"\n../camera/index.m3u8?auth_key=abc\nhttps://mss3.sjtu.edu.cn/live/segment.ts\nsegment.ts?signature=xyz\n";
+        let rewritten = rewrite_live_playlist(playlist, "https://mss2.sjtu.edu.cn/live/a/index.m3u8?auth_key=abc", "http://localhost:3030");
+        assert!(rewritten.contains("URI=\"http://localhost:3030/canvas-stream/mss2.sjtu.edu.cn/live/a/key.bin?key=signed\""));
+        assert!(rewritten.contains("URI=\"http://localhost:3030/canvas-stream/mss2.sjtu.edu.cn/live/init.mp4\""));
+        assert!(rewritten.contains("http://localhost:3030/canvas-stream/mss2.sjtu.edu.cn/live/camera/index.m3u8?auth_key=abc"));
+        assert!(rewritten.contains("http://localhost:3030/canvas-stream/mss3.sjtu.edu.cn/live/segment.ts"));
+        assert!(rewritten.contains("http://localhost:3030/canvas-stream/mss2.sjtu.edu.cn/live/a/segment.ts?signature=xyz"));
+    }
+
+    #[test]
+    fn live_proxy_only_accepts_known_sjtu_media_hosts() {
+        assert!(canvas_stream_host("mss2.sjtu.edu.cn"));
+        assert!(canvas_stream_host("live.sjtu.edu.cn"));
+        for host in ["localhost", "127.0.0.1", "mss2.sjtu.edu.cn.evil.test", "mss.sjtu.edu.cn", "example.test"] {
+            assert!(!canvas_stream_host(host));
+        }
+        let unchanged = rewrite_live_playlist("#EXTM3U\nhttps://example.test/private.ts\n", "https://mss2.sjtu.edu.cn/live/a.m3u8", "http://localhost:3030");
+        assert!(unchanged.contains("https://example.test/private.ts"));
+    }
+
+    #[tokio::test]
+    async fn live_and_recording_share_one_ready_proxy() {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        let app = App {
+            client: Arc::new(Client::new_without_proxy("http://127.0.0.1", "", "", "", None)),
+            current_account: Default::default(), config: Default::default(),
+            handle: Default::default(), mcp_handle: Default::default(), cache: Default::default(),
         };
-        let start = content.len().saturating_sub(MAX_LOG_READ_BYTES);
-        Ok(String::from_utf8_lossy(&content[start..]).into_owned())
+        app.config.write().await.proxy_port = port;
+        let (live, recording) = tokio::join!(app.prepare_proxy(), app.prepare_proxy());
+        let denied = reqwest::Client::builder().no_proxy().build().unwrap()
+            .get(format!("http://localhost:{port}/canvas-stream/localhost/private"))
+            .send().await.unwrap();
+        app.stop_proxy().await;
+        assert!(live.unwrap()); assert!(recording.unwrap());
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
     }
 }

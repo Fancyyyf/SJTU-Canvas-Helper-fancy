@@ -24,7 +24,7 @@ describe("video course merging", () => {
     space.term.name = "2097-2098 第一学期";
     const result = mergeVideoCourses([course(10)], [space]);
     expect(result).toHaveLength(2);
-    expect(result[1]).toMatchObject({ id: -1, teachingClassId: 10, sourceLabel: "视频空间" });
+    expect(result[1]).toMatchObject({ id: -2, teachingClassId: 10, sourceLabel: "视频空间" });
   });
   it("does not merge ambiguous classes", () => {
     expect(mergeVideoCourses([course(10), course(11)], [course(80)])).toHaveLength(3);
@@ -33,11 +33,29 @@ describe("video course merging", () => {
   it("deduplicates repeated records within a source", () => {
     expect(mergeVideoCourses([course(10), course(10)], [course(80), course(80)])).toHaveLength(1);
   });
+  it("matches localized course names by an exact course code", () => {
+    const canvasTeachers = [{
+      id: 1,
+      anonymous_id: "",
+      display_name: "测试教师甲",
+      avatar_image_url: "",
+      html_url: "",
+    }];
+    const spaceTeachers = [{ ...canvasTeachers[0], display_name: "测试教师乙" }];
+    const result = mergeVideoCourses(
+      [course(10, { name: "Example Course II", course_code: "DEMO-201", teachers: canvasTeachers })],
+      [course(80, { name: "示例课程（二）", course_code: " demo-201 ", teachers: spaceTeachers })],
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ canvasId: 10, teachingClassId: 80 });
+  });
   it("matches names and teachers when course codes differ", () => {
     const teachers = [{ id: 1, anonymous_id: "", display_name: "测试教师甲", avatar_image_url: "", html_url: "" }];
     expect(mergeVideoCourses([course(10, { teachers })], [course(80, { teachers, course_code: "" })])).toHaveLength(1);
     expect(mergeVideoCourses([course(10, { teachers })], [course(80, {
       teachers: [{ ...teachers[0], display_name: "测试教师乙" }],
+      course_code: "",
     })])).toHaveLength(2);
     expect(mergeVideoCourses([course(10)], [course(80, { course_code: "" })])).toHaveLength(2);
   });
@@ -110,7 +128,7 @@ describe("video course fallback", () => {
       vi.fn().mockResolvedValue([canvasVideo]),
       vi.fn().mockResolvedValue([]),
       vi.fn().mockResolvedValue([legacyVideo]),
-    )).resolves.toEqual([canvasVideo]);
+    )).resolves.toEqual([{ ...canvasVideo, alternatives: [legacyVideo] }]);
   });
   it("loads space-only courses using their original teaching class ID", async () => {
     const canvas = vi.fn();

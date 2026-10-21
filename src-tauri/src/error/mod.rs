@@ -26,6 +26,10 @@ pub enum AppError {
     #[error("Function unsupported")]
     #[allow(dead_code)]
     FunctionUnsupported,
+    #[error("Document conversion failed: {0}")]
+    DocumentConversion(String),
+    #[error("File preview failed: {0}")]
+    FilePreview(String),
     #[error("Submission upload error: {0}")]
     SubmissionUpload(String),
     #[error("Join error: {0}")]
@@ -89,6 +93,8 @@ impl AppError {
             Self::DocxReaderError(_) => "FILE.DOCX_READ_FAILED",
             Self::LLMError(_) => "LLM.OPERATION_FAILED",
             Self::AttendanceError(_) => "ATTENDANCE.OPERATION_FAILED",
+            Self::DocumentConversion(_) => "FILE.DOCUMENT_CONVERSION_FAILED",
+            Self::FilePreview(_) => "FILE.PREVIEW_FAILED",
         }
     }
 

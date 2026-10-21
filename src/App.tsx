@@ -6,6 +6,8 @@ import AppRouter from "./components/router";
 import "./css/global.css";
 import { useConfigSelector } from "./lib/hooks";
 import { AppMessageProvider } from "./lib/message";
+import { UpdateNoticeProvider } from "./lib/update_notice";
+import { useAppZoom } from "./lib/app_zoom";
 
 const FONT_DISPLAY =
   '"Iowan Old Style", "Palatino Linotype", "Georgia", "STZhongsong", "SimSun", "Songti SC", serif';
@@ -13,6 +15,7 @@ const FONT_BODY =
   '"Aptos", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
 
 function App() {
+  useAppZoom();
   const config = useConfigSelector((state) => state.config.data);
 
   const muiTheme = useMemo(() => {
@@ -346,7 +349,9 @@ function App() {
         }}
       />
       <AppMessageProvider>
-        <AppRouter />
+        <UpdateNoticeProvider>
+          <AppRouter />
+        </UpdateNoticeProvider>
       </AppMessageProvider>
     </ThemeProvider>
   );

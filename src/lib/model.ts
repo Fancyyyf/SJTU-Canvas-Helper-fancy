@@ -67,6 +67,7 @@ export interface File {
     filename: string;
     mime_class: string;
     "content-type": string;
+    preview_url?: string | null;
     size: number;
     created_at?: Option<string>;
     updated_at?: Option<string>;
@@ -264,8 +265,9 @@ export interface Attachment {
 export interface FileDownloadTask {
     key: string;
     file: File;
+    outputFormat?: "original" | "pdf";
     progress: number;
-    state: DownloadState;
+    state: FileDownloadState;
 }
 
 export interface VideoDownloadTask {
@@ -280,10 +282,11 @@ export interface DownloadTask {
     name: string;
     outputPath?: string;
     progress: number;
-    state: "downloading" | "completed" | "fail" | "merging";
+    state: "queued" | "downloading" | "completed" | "fail" | "merging";
 }
 
-export type DownloadState = "downloading" | "succeed" | "fail" | "wait_retry";
+export type DownloadState = "queued" | "downloading" | "succeed" | "fail" | "wait_retry";
+export type FileDownloadState = DownloadState | "converting" | "uploading";
 export type Theme = "light" | "dark";
 export type CloseBehavior = "minimize_to_tray" | "quit";
 
@@ -321,8 +324,13 @@ export interface AppConfig {
     llm_temperature: Option<number>;
     llm_api_keys: LlmApiKeyEntry[];
     llm_active_api_key: string;
+    video_summary_prompt?: string;
+    video_summary_context_tokens?: number;
+    video_summary_output_tokens?: number;
     theme: Theme;
     compact_mode: boolean;
+    experimental_task_center_only?: boolean;
+    experimental_ppt_cleanup?: boolean;
     color_primary: Option<string>;
     mcp_enabled: boolean;
     mcp_port: number;
@@ -400,6 +408,7 @@ export interface VideoCourse {
 }
 
 export interface CanvasVideo {
+    alternatives?: CanvasVideo[];
     source: VideoSource;
     videoId: string;
     userName: string;
@@ -412,11 +421,38 @@ export interface CanvasVideo {
     lessonNumber: number;
     dailyLessonNumber: number;
     playable: boolean;
+    /** Raw transcript/PPT readiness hint; omitted/null means unknown. */
+    aiAvailable?: boolean | null;
     availability: "ready" | "repairing" | "unavailable";
     availabilityLabel: string;
 }
 
 export type VideoSource = "canvas" | "videoSpace" | "legacy";
+
+export interface CanvasLiveSession {
+    id: string;
+    teachingClassId: number;
+    title: string;
+    teacherName: string;
+    classroomName: string;
+    beginTime: string;
+    endTime: string;
+    startTime: number;
+    finishTime: number;
+    enabled: boolean;
+}
+
+export interface CanvasLiveList {
+    sessions: CanvasLiveSession[];
+    serverTime: number;
+}
+
+export interface CanvasLiveInfo {
+    startTime: number;
+    finishTime: number;
+    serverTime: number;
+    tracks: { name: string; url: string }[];
+}
 
 export interface Video {
     id: number;

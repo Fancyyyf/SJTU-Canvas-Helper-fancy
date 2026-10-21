@@ -25,3 +25,7 @@ jobs:
         run: yarn typecheck
       - name: Frontend tests
         run: yarn test
+      - name: Portable packaging tests
+        run: node --test .github/workflows/windows-portable/portable-archive.node-test.mjs
+      - name: Staged Rust check regression tests
+        run: node --test script/check-rust.node-test.mjs

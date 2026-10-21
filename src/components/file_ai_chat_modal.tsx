@@ -1,3 +1,4 @@
+import { isAccountTransitioning, useAccountTransitioning } from "../lib/account_transition";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
 import {
@@ -209,6 +210,7 @@ export default function FileAIChatModal({
   title,
   messages,
   loading,
+  loadingLabel,
   onClose,
   onSend,
   dialogTitle = "AI 文件会话",
@@ -218,11 +220,18 @@ export default function FileAIChatModal({
   inputPlaceholder = "继续追问这份文件，例如：这份作业的评分点是什么？有没有截止时间或提交格式要求？",
   footerIdleText = "提问会保留在当前会话中，后续回答会继续参考这份上下文。",
   markdownComponents,
+  embedded = false,
+  input: controlledInput,
+  onInputChange,
 }: {
+  input?: string;
+  onInputChange?: (input: string) => void;
+  embedded?: boolean;
   open: boolean;
   title: string;
   messages: FileAIChatMessage[];
   loading: boolean;
+  loadingLabel?: string;
   onClose: () => void;
   onSend: (message: string) => Promise<void> | void;
   dialogTitle?: string;
@@ -234,17 +243,20 @@ export default function FileAIChatModal({
   markdownComponents?: Components;
 }) {
   const theme = useTheme();
-  const [input, setInput] = useState("");
+  const [localInput, setLocalInput] = useState("");
+  const input = controlledInput ?? localInput;
+  const setInput = onInputChange ?? setLocalInput;
   const bodyRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
 
-  const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
+  const changingAccount = useAccountTransitioning();
+  const canSend = useMemo(() => input.trim().length > 0 && !loading && !changingAccount, [input, loading, changingAccount]);
 
   useEffect(() => {
-    if (!open) {
-      setInput("");
+    if (!open && controlledInput === undefined) {
+      setLocalInput("");
     }
-  }, [open]);
+  }, [open, controlledInput]);
 
   useEffect(() => {
     if (!bodyRef.current) {
@@ -270,28 +282,15 @@ export default function FileAIChatModal({
 
   const handleSubmit = async () => {
     const nextInput = input.trim();
-    if (!nextInput || loading) {
+    if (!nextInput || loading || isAccountTransitioning()) {
       return;
     }
     setInput("");
     await onSend(nextInput);
   };
 
-  return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      fullWidth
-      maxWidth="lg"
-      PaperProps={{
-        sx: {
-          borderRadius: "32px",
-          overflow: "hidden",
-          minHeight: { md: "78vh" },
-        },
-      }}
-    >
-      <DialogTitle sx={{ pb: 1.5 }}>
+  const content = <>
+      <DialogTitle component="div" sx={{ pb: 1.5 }}>
         <Stack spacing={1.25}>
           <Stack
             direction={{ xs: "column", md: "row" }}
@@ -303,13 +302,13 @@ export default function FileAIChatModal({
               <Typography variant="h6" sx={{ fontWeight: 800 }}>
                 {dialogTitle}
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" color="text.secondary" sx={embedded ? { maxHeight: 64, overflowY: "auto" } : undefined}>
                 {dialogDescription}
               </Typography>
             </Box>
             <Chip
               icon={<SmartToyRoundedIcon />}
-              label={loading ? "AI 正在回复" : "可继续追问"}
+              label={loading ? (loadingLabel || "AI 正在回复") : "可继续追问"}
               color={loading ? "warning" : "primary"}
               variant="outlined"
             />
@@ -326,7 +325,7 @@ export default function FileAIChatModal({
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
               {contextLabel}
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" color="text.secondary" sx={embedded ? { maxHeight: 64, overflowY: "auto" } : undefined}>
               {title}
             </Typography>
           </Box>
@@ -340,6 +339,7 @@ export default function FileAIChatModal({
           gridTemplateRows: "minmax(0, 1fr) auto",
           gap: 2,
           p: 0,
+          minHeight: 0,
         }}
       >
         <Box
@@ -367,7 +367,7 @@ export default function FileAIChatModal({
                 >
                   <Chip
                     icon={<SmartToyRoundedIcon />}
-                    label="AI 正在流式生成中"
+                    label={loadingLabel || "AI 正在流式生成中"}
                     color="warning"
                     sx={{
                       height: 32,
@@ -410,17 +410,17 @@ export default function FileAIChatModal({
           <Stack spacing={1.25}>
             <TextField
               multiline
-              minRows={3}
+              minRows={embedded ? 2 : 3}
               maxRows={8}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder={inputPlaceholder}
-              disabled={loading}
+              disabled={loading || changingAccount}
             />
             <Stack direction="row" justifyContent="space-between" alignItems="center">
               <Typography variant="caption" color="text.secondary">
                 {loading
-                  ? "AI 正在边生成边返回内容；如果你向上翻阅历史，界面会暂时停止自动跟随。"
+                  ? (loadingLabel || "AI 正在边生成边返回内容；如果你向上翻阅历史，界面会暂时停止自动跟随。")
                   : footerIdleText}
               </Typography>
               <Button
@@ -435,6 +435,7 @@ export default function FileAIChatModal({
           </Stack>
         </Box>
       </DialogContent>
-    </Dialog>
-  );
+  </>;
+  if (embedded) return open ? <Box sx={{ display: "flex", flexDirection: "column", height: "min(76vh, 800px)", minHeight: 420, minWidth: 0 }}>{content}</Box> : null;
+  return <Dialog open={open} onClose={onClose} fullWidth maxWidth="lg" PaperProps={{ sx: { borderRadius: "32px", overflow: "hidden", minHeight: { md: "78vh" } } }}>{content}</Dialog>;
 }

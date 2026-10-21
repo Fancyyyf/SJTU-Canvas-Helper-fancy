@@ -4,7 +4,8 @@ use super::App;
 use crate::{
     error::{AppError, Result},
     model::{
-        CanvasVideo, Course, LiveInfo, ProgressPayload, VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
+        CanvasLiveInfo, CanvasLiveList, CanvasVideo, Course, ProgressPayload,
+        VideoCourse, VideoInfo, VideoPlayInfo, VideoSource,
     },
 };
 // Apis for course video
@@ -56,6 +57,14 @@ impl App {
 
     pub async fn list_video_space_courses(&self) -> Result<Vec<Course>> {
         self.client.list_video_space_courses().await
+    }
+
+    pub async fn get_video_live_sessions(&self, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveList> {
+        self.client.get_video_live_sessions(canvas_course_id, teaching_class_id).await
+    }
+
+    pub async fn get_video_live_info(&self, course_id: &str, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveInfo> {
+        self.client.get_video_live_info(course_id, canvas_course_id, teaching_class_id).await
     }
 
     pub async fn get_video_space_videos(&self, teaching_class_id: i64) -> Result<Vec<CanvasVideo>> {
@@ -110,10 +119,6 @@ impl App {
         self.client.get_canvas_videos(course_id).await
     }
 
-    pub async fn get_canvas_live_info(&self, course_id: i64) -> Result<LiveInfo> {
-        self.client.get_canvas_live_info(course_id).await
-    }
-
     pub async fn download_video<F: Fn(ProgressPayload) + Send + 'static>(
         &self,
         video: &VideoPlayInfo,
@@ -148,11 +153,18 @@ impl App {
         canvas_course_id: i64,
         save_path: &str,
         progress_handler: F,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let res = self.client.get_ppt(canvas_course_id).await?;
+        let enabled = self.config.read().await.experimental_ppt_cleanup;
+        let (res, notes) = super::ppt::clean_up_slides(res, enabled);
+        if res.is_empty() {
+            return Err(AppError::VideoDownloadError("没有可导出的 PPT 页面，可关闭“导出 PPT 时去除无用页面”后重试".into()));
+        }
+        for note in &notes { tracing::info!("{note}"); }
         self.client
             .clone()
             .download_ppt_pdf(&res, save_path, progress_handler)
-            .await
+            .await?;
+        Ok(notes)
     }
 }

@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     fs::File,
     io::Write,
-    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -21,10 +20,9 @@ use crate::{
     },
     error::{AppError, Result},
     model::{
-        CanvasVideo, CanvasVideoPPT, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody, Course,
-        ItemPage, LiveChannel, LiveInfo, ProgressPayload, Teacher, Term, VideoCourse, VideoInfo,
-        VideoPlayInfo,
-        VideoSource,
+        CanvasVideo, CanvasVideoPPT, CanvasVideoPPTOcr, CanvasVideoSubTitle, CanvasVideoSubTitleResponseBody, Course,
+        ItemPage, ProgressPayload, Teacher, Term, VideoCourse, VideoInfo, VideoPlayInfo,
+        VideoSource, CanvasLiveSession, CanvasLiveList, CanvasLiveInfo, CanvasLiveTrack,
     },
     utils::{self, file::get_file_name, file::write_file_at_offset, time::format_time},
 };
@@ -133,6 +131,7 @@ impl From<LegacyCanvasVideo> for CanvasVideo {
             course_begin_time: video.course_begin_time,
             course_end_time: video.course_end_time,
             playable: true,
+            ai_available: Some(false),
             ..Default::default()
         }
     }
@@ -216,6 +215,7 @@ fn legacy_videos_from_course(course: VideoCourse) -> Vec<CanvasVideo> {
             playable: true,
             availability: "ready".to_string(),
             availability_label: "可播放".to_string(),
+            ai_available: Some(false),
             ..Default::default()
         })
         .collect()
@@ -313,6 +313,22 @@ fn canvas_video_availability(record: &Value) -> (bool, String, String) {
     }
 }
 
+fn canvas_video_ai_available(record: &Value) -> Option<bool> {
+    // Summaries consume raw transcripts or PPT OCR, independently of video
+    // playback and optimized transcripts. Use existing list hints without probing text.
+    let transferred = record.get("courTransferFlag").and_then(Value::as_bool)
+        .or_else(|| value_as_i64(record.get("courTransferFlag")).map(|flag| flag != 0));
+    let ppt_status = value_as_i64(record.get("coursePptSliceStatus"));
+    if transferred == Some(true) || ppt_status == Some(5) {
+        return Some(true);
+    }
+    // Only declare materials unavailable when both source statuses are known.
+    match (transferred, ppt_status) {
+        (Some(false), Some(_)) => Some(false),
+        _ => None,
+    }
+}
+
 fn daily_lesson_numbers(records: &[Value]) -> HashMap<usize, i64> {
     let mut daily_records: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (index, record) in records.iter().enumerate() {
@@ -357,6 +373,68 @@ fn api_data(value: &Value) -> Result<&Value> {
         .or_else(|| value.get("result"))
         .filter(|value| !value.is_null())
         .ok_or_else(|| AppError::VideoDownloadError("Video service returned no data".to_string()))
+}
+
+fn live_server_time(value: &Value) -> i64 {
+    value_as_i64(value.get("timestamp"))
+        .filter(|time| *time > 0)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+}
+
+fn live_sessions_from_response(value: &Value) -> Result<CanvasLiveList> {
+    let records = api_data(value)?.get("records").and_then(Value::as_array)
+        .ok_or_else(|| AppError::VideoDownloadError("直播列表缺少课节数据".into()))?;
+    let sessions = records.iter().filter_map(|record| {
+        let id = value_as_i64(record.get("id")).filter(|id| *id > 0)?;
+        let start_time = value_as_i64(record.get("liveStartTime"))?;
+        let finish_time = value_as_i64(record.get("liveEndTime"))?;
+        if start_time <= 0 || finish_time <= start_time { return None; }
+        let teacher_name = record.get("teacNames").and_then(Value::as_array)
+            .map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("、"))
+            .unwrap_or_else(|| first_string(record, &["tecName"]));
+        Some(CanvasLiveSession {
+            id: id.to_string(),
+            teaching_class_id: value_as_i64(record.get("teclId")).unwrap_or_default(),
+            title: first_string(record, &["subjName", "courName"]),
+            teacher_name,
+            classroom_name: first_string(record, &["clroName", "classRoomName"]),
+            begin_time: first_string(record, &["courBeginTime"]),
+            end_time: first_string(record, &["courEndTime"]),
+            start_time, finish_time,
+            // courLiveOpen can be zero before the scheduled start; liveEnable is the viewing permission.
+            enabled: value_as_i64(record.get("liveEnable")) == Some(1),
+        })
+    }).collect();
+    Ok(CanvasLiveList { sessions, server_time: live_server_time(value) })
+}
+
+fn live_info_from_response(value: &Value) -> Result<CanvasLiveInfo> {
+    let data = api_data(value)?;
+    let error = first_string(data, &["errorMsg"]);
+    if !error.is_empty() { return Err(AppError::VideoDownloadError(error)); }
+    if value_as_i64(data.get("lvcrLiveStatus")) != Some(1) {
+        return Err(AppError::VideoDownloadError("暂无权限观看本节直播".into()));
+    }
+    let start_time = value_as_i64(data.get("liveStartTime")).unwrap_or_default();
+    let finish_time = value_as_i64(data.get("liveEndTime")).unwrap_or_default();
+    let server_time = live_server_time(value);
+    if start_time <= 0 || finish_time <= start_time {
+        return Err(AppError::VideoDownloadError("直播时间信息缺失".into()));
+    }
+    if server_time < start_time { return Err(AppError::VideoDownloadError("直播未开始".into())); }
+    if server_time >= finish_time { return Err(AppError::VideoDownloadError("直播已结束，请刷新录像列表查看回放".into())); }
+    let tracks: Vec<CanvasLiveTrack> = data.get("courseDeviceViewDtoList").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(|record| {
+            if value_as_i64(record.get("deviceStatus")) == Some(0) { return None; }
+            let mut url = Url::parse(&first_string(record, &["chanNameMainPlayUrl"])).ok()?;
+            if url.scheme() != "https" || !url.path().ends_with(".m3u8") { return None; }
+            let token = first_string(record, &["mainTokenStr"]);
+            if !token.is_empty() { url.query_pairs_mut().append_pair("account_token", &token); }
+            let name = first_string(record, &["chanNameMain"]);
+            Some(CanvasLiveTrack { name: if name.is_empty() { "直播机位".into() } else { name }, url: url.to_string() })
+        }).collect();
+    if tracks.is_empty() { return Err(AppError::VideoDownloadError("当前教室暂无可用的 HLS 直播机位".into())); }
+    Ok(CanvasLiveInfo { start_time, finish_time, server_time, tracks })
 }
 
 fn canvas_videos_from_response(value: &Value, source: VideoSource) -> Result<Vec<CanvasVideo>> {
@@ -413,6 +491,7 @@ fn canvas_videos_from_response(value: &Value, source: VideoSource) -> Result<Vec
                 lesson_number,
                 daily_lesson_number,
                 playable,
+                ai_available: canvas_video_ai_available(record),
                 availability,
                 availability_label,
             })
@@ -497,13 +576,40 @@ fn ppts_from_response(value: &Value) -> Result<Vec<CanvasVideoPPT>> {
         .iter()
         .filter_map(|doc| {
             let url = first_string(doc, &["imageUrl", "pptImgUrl", "url"]);
-            (!url.is_empty()).then(|| CanvasVideoPPT {
-                create_sec: first_string(doc, &["createSec", "createTime", "time"]),
-                ocr: Vec::new(),
-                ppt_img_url: Some(url),
+            let mut ocr = doc.get("textKeywordList").map(parse_ppt_ocr).unwrap_or_default();
+            if ocr.is_empty() {
+                ocr = doc.get("ocr").map(parse_ppt_ocr).unwrap_or_default();
+            }
+            let ocr_text = first_string(doc, &["ocrText"]);
+            (!url.is_empty() || !ocr.is_empty() || !ocr_text.trim().is_empty()).then(|| CanvasVideoPPT {
+                // imageSnapshotTime is a wall-clock placeholder, not the playback offset.
+                create_sec: first_string(doc, &["imageSeekTime", "createSec", "createTime", "time"]),
+                ocr,
+                ocr_text,
+                animation_start_sec: None,
+                related_slide_secs: Vec::new(),
+                ppt_img_url: (!url.is_empty()).then_some(url),
             })
         })
         .collect())
+}
+
+fn parse_ppt_ocr(value: &Value) -> Vec<CanvasVideoPPTOcr> {
+    match value {
+        Value::Array(items) => items.iter().flat_map(parse_ppt_ocr).collect(),
+        Value::Object(_) => {
+            let word = first_string(value, &["word", "text"]);
+            if word.trim().is_empty() { Vec::new() } else { vec![CanvasVideoPPTOcr { word }] }
+        }
+        Value::String(word) if !word.trim().is_empty() => {
+            // Some service versions JSON-encode the OCR list.
+            if let Ok(parsed) = serde_json::from_str::<Value>(word) {
+                if parsed.is_array() || parsed.is_object() { return parse_ppt_ocr(&parsed); }
+            }
+            vec![CanvasVideoPPTOcr { word: word.clone() }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn jwt_token_from_location(location: &str) -> Option<String> {
@@ -587,19 +693,7 @@ impl Client {
     }
 
     pub async fn get_uuid(&self) -> Result<Option<String>> {
-        // QR login must start without cookies from an earlier authenticated
-        // session. Reusing `self.cli` can make my.sjtu return the signed-in
-        // application page, which contains no QR UUID and looks like a QR
-        // service failure to the frontend.
-        let qr_client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
-            .cookie_store(true)
-            .build()?;
-        let resp = qr_client
-            .get(MY_SJTU_URL)
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self.cli.get(MY_SJTU_URL).send().await?.error_for_status()?;
         let body = resp.text().await?;
         // let document = Document::from(body.as_str());
         let re = Regex::new(
@@ -943,6 +1037,38 @@ impl Client {
             .await
     }
 
+    async fn live_teaching_class_token(&self, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<(i64, String)> {
+        let (id, token) = if let Some(id) = teaching_class_id.filter(|id| *id > 0) {
+            (id, self.get_video_space_token().await?)
+        } else if let Some(id) = canvas_course_id.filter(|id| *id > 0) {
+            self.get_teaching_class_id_token(id).await?
+        } else {
+            return Err(AppError::VideoDownloadError("当前课程没有可用的直播来源".into()));
+        };
+        *self.token.write().await = token.clone();
+        Ok((id, token))
+    }
+
+    pub async fn get_video_live_sessions(&self, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveList> {
+        let (id, token) = self.live_teaching_class_token(canvas_course_id, teaching_class_id).await?;
+        let response = self.cli.get(format!("{RESOURCE_MANAGE_BASE_URL}/v1/vod_live/t-1"))
+            .header(REFERER, RESOURCE_MANAGE_UI_URL).header("jwt-token", token)
+            .query(&[("page.pageIndex", "1".to_string()), ("page.pageSize", "1000".to_string()),
+                ("page.orders[0].asc", "true".to_string()), ("page.orders[0].field", "courBeginTime".to_string()),
+                ("liveDay", "0".to_string()), ("teclId", id.to_string())])
+            .send().await?.error_for_status()?;
+        live_sessions_from_response(&serde_json::from_slice(&response.bytes().await?)?)
+    }
+
+    pub async fn get_video_live_info(&self, course_id: &str, canvas_course_id: Option<i64>, teaching_class_id: Option<i64>) -> Result<CanvasLiveInfo> {
+        let (_, token) = self.live_teaching_class_token(canvas_course_id, teaching_class_id).await?;
+        let response = self.cli.get(format!("{RESOURCE_MANAGE_BASE_URL}/v1/course_vod_videoinfos"))
+            .header(REFERER, RESOURCE_MANAGE_UI_URL).header("jwt-token", token)
+            .query(&[("courseId", course_id), ("playType", "3")])
+            .send().await?.error_for_status()?;
+        live_info_from_response(&serde_json::from_slice(&response.bytes().await?)?)
+    }
+
     async fn get_legacy_canvas_course_id(&self, course_id: i64) -> Result<Option<String>> {
         let tool_urls = self.get_course_external_tool_urls(course_id).await?;
         let client = reqwest::Client::builder()
@@ -1191,13 +1317,8 @@ impl Client {
 
     async fn get_download_video_metadata(&self, url: &str) -> Result<(u64, bool)> {
         let resp = self.download_video_partial(url, 0, 0).await?;
-        tracing::debug!(
-            status = %resp.status(),
-            content_length = ?resp.headers().get(reqwest::header::CONTENT_LENGTH),
-            content_range = ?resp.headers().get(reqwest::header::CONTENT_RANGE),
-            accept_ranges = ?resp.headers().get(reqwest::header::ACCEPT_RANGES),
-            "Video download probe completed"
-        );
+        // log headers:
+        tracing::info!("headers: {:?}", resp.headers());
         Ok(parse_download_probe(resp.status(), resp.headers()))
     }
 
@@ -1253,7 +1374,7 @@ impl Client {
                 payload_guard.processed = current_offset;
                 progress_handler.lock().await(payload_guard.clone());
             }
-            tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video download completed");
+            tracing::info!("Successfully downloaded video to {}", save_path);
             return Ok(());
         }
 
@@ -1261,7 +1382,7 @@ impl Client {
         let payload = Arc::new(Mutex::new(payload));
 
         let nproc = num_cpus::get();
-        tracing::debug!(workers = nproc, "Starting ranged video download");
+        tracing::info!("nproc: {}", nproc);
         let chunk_size = size / nproc as u64;
         let mut tasks = JoinSet::new();
         for i in 0..nproc {
@@ -1294,6 +1415,7 @@ impl Client {
                     }
                     let bytes = response.bytes().await?;
                     let read_bytes = bytes.len() as u64;
+                    tracing::info!("read_bytes: {:?}", read_bytes);
                     {
                         let mut file = output_file.lock().await;
                         write_file_at_offset(file.by_ref(), &bytes, current_begin)?;
@@ -1312,7 +1434,7 @@ impl Client {
         while let Some(result) = tasks.join_next().await {
             result??;
         }
-        tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video download completed");
+        tracing::info!("Successfully downloaded video to {}", save_path);
         Ok(())
     }
 
@@ -1331,105 +1453,6 @@ impl Client {
         video_info_from_response(&value)
     }
 
-    /// 获取课程当前直播信息（场次 -> 两路通道 -> 可直接播放的完整 URL）。
-    pub async fn get_canvas_live_info(&self, course_id: i64) -> Result<LiveInfo> {
-        let (teaching_class_id, token) = self.get_teaching_class_id_token(course_id).await?;
-        *self.token.write().await = token.to_owned();
-
-        // 1) 场次列表，找“直播中”的那一场
-        let sessions_url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/vod_live/t-1");
-        let sessions_resp = self
-            .cli
-            .get(sessions_url)
-            .header(REFERER, RESOURCE_MANAGE_UI_URL)
-            .header("jwt-token", token.as_str())
-            .query(&[
-                ("page.pageIndex", "1".to_string()),
-                ("page.pageSize", "1000".to_string()),
-                ("page.orders[0].asc", "true".to_string()),
-                ("page.orders[0].field", "courBeginTime".to_string()),
-                ("liveDay", "0".to_string()),
-                ("teclId", teaching_class_id.to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?;
-        let sessions_value: Value = serde_json::from_slice(&sessions_resp.bytes().await?)?;
-        let records = api_data(&sessions_value)?
-            .get("records")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                AppError::VideoDownloadError("Live sessions are missing records".to_string())
-            })?;
-        let live_session = records
-            .iter()
-            .find(|record| {
-                record.get("liveDesc").and_then(Value::as_str) == Some("直播中")
-                    || value_as_i64(record.get("courLiveOpen")) == Some(1)
-                    || value_as_i64(record.get("liveEnable")) == Some(1)
-            })
-            .ok_or_else(|| AppError::VideoDownloadError("No live session found".to_string()))?;
-        let session_id = value_as_i64(live_session.get("id")).ok_or_else(|| {
-            AppError::VideoDownloadError("Live session id is missing".to_string())
-        })?;
-
-        // 2) 取该场次的直播通道（含 mss2 的 .flv 地址与 account_token）
-        let info_url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/course_vod_videoinfos");
-        let info_resp = self
-            .cli
-            .get(info_url)
-            .header(REFERER, RESOURCE_MANAGE_UI_URL)
-            .header("jwt-token", self.token.read().await.as_str())
-            .query(&[
-                ("courseId", session_id.to_string()),
-                ("playType", "2".to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?;
-        let info_value: Value = serde_json::from_slice(&info_resp.bytes().await?)?;
-        let data = api_data(&info_value)?;
-        let channels = data
-            .get("courseDeviceViewDtoList")
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(|channel| {
-                        let play_url = first_string(channel, &["chanNameMainPlayUrl"]);
-                        if play_url.is_empty() {
-                            return None;
-                        }
-                        let account_token = first_string(channel, &["mainTokenStr"]);
-                        let name = first_string(channel, &["chanNameMain"]);
-                        let full_url = if account_token.is_empty() {
-                            play_url.clone()
-                        } else {
-                            format!("{play_url}&account_token={account_token}")
-                        };
-                        Some(LiveChannel {
-                            name,
-                            play_url,
-                            account_token,
-                            full_url,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        Ok(LiveInfo {
-            course_id,
-            tecl_id: teaching_class_id,
-            session_id,
-            live: true,
-            subj_code: first_string(live_session, &["subjCode"]),
-            subj_name: first_string(live_session, &["subjName", "teclName"]),
-            classroom: first_string(live_session, &["clroName"]),
-            live_end_time: value_as_i64(live_session.get("liveEndTime")).unwrap_or_default(),
-            channels,
-        })
-    }
-
     pub async fn get_video_info(
         &self,
         video_id: i64,
@@ -1439,13 +1462,10 @@ impl Client {
         let oauth_nonce = self.get_oauth_nonce();
         let oauth_signature = self.get_oauth_signature(video_id, &oauth_nonce, oauth_consumer_key);
 
-        tracing::debug!(
-            video_id,
-            nonce_present = !oauth_nonce.is_empty(),
-            consumer_key_present = !oauth_consumer_key.is_empty(),
-            signature_present = !oauth_signature.is_empty(),
-            "Video OAuth request prepared"
-        );
+        tracing::debug!("oauth_nonce: {}", oauth_nonce);
+        tracing::debug!("oauth_signature: {}", oauth_signature);
+        tracing::debug!("oauth_consumer_key: {}", oauth_consumer_key);
+        tracing::debug!("video_id: {}", video_id);
 
         let video_id_str = video_id.to_string();
         form_data.insert("playTypeHls", "true");
@@ -1536,6 +1556,9 @@ impl Client {
         progress_handler: F,
     ) -> Result<()> {
         let total = ppts.len() as u64;
+        if !ppts.iter().any(|ppt| ppt.ppt_img_url.is_some()) {
+            return Err(AppError::VideoDownloadError("PPT 切片缺少可用图片".into()));
+        }
         let mut warning: Vec<PdfWarnMsg> = Vec::new();
         // extract savename from save_path
         let save_name = get_file_name(save_path);
@@ -1560,7 +1583,8 @@ impl Client {
             tracing::info!("Downloaded image {}: {} bytes", index, image_data.len());
 
             // TODO: Add To PDF
-            let image = RawImage::decode_from_bytes(&image_data, &mut warning).unwrap();
+            let image = RawImage::decode_from_bytes(&image_data, &mut warning)
+                .map_err(|e| AppError::VideoDownloadError(format!("Invalid PPT image {index}: {e}")))?;
             images.push(image.clone());
 
             // Report progress
@@ -1597,8 +1621,8 @@ impl Client {
         let mut file = File::create(save_path)?;
         file.write_all(&pdf_bytes)?;
         file.flush()?;
-        tracing::info!(file_name = ?Path::new(save_path).file_name(), "Video slides PDF saved");
-        tracing::debug!(warning_count = warning.len(), "Video slides PDF conversion completed");
+        tracing::info!("PDF saved to {}", save_path);
+        tracing::info!("PDF warnings: {:?}", warning);
 
         Ok(())
     }
@@ -1606,13 +1630,201 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::fs;
 
     use super::*;
-    use crate::client::constants::BASE_URL;
-    use httpmock::prelude::*;
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
-    use uuid::Uuid;
+
+    #[test]
+    fn test_live_list_keeps_upcoming_sections_and_requires_valid_times() {
+        let list = live_sessions_from_response(&serde_json::json!({"status":200, "timestamp":150, "data":{"records":[
+            {"id":1,"teclId":2,"subjName":"测试课程","teacNames":["教师"],"liveStartTime":100,"liveEndTime":200,"liveEnable":1,"courLiveOpen":1},
+            {"id":2,"teclId":2,"liveStartTime":200,"liveEndTime":300,"liveEnable":1,"courLiveOpen":0},
+            {"id":3,"liveStartTime":200,"liveEndTime":100},
+            {"id":0,"liveStartTime":100,"liveEndTime":200}
+        ]}})).unwrap();
+        assert_eq!(list.server_time, 150);
+        assert_eq!(list.sessions.len(), 2);
+        assert_eq!(list.sessions[0].teacher_name, "教师");
+        assert!(list.sessions[1].enabled);
+    }
+
+    #[test]
+    fn test_live_info_preserves_signed_urls_and_encodes_camera_tokens() {
+        let value = serde_json::json!({"status":200,"timestamp":150,"data":{
+            "lvcrLiveStatus":1,"liveStartTime":100,"liveEndTime":200,"courseDeviceViewDtoList":[
+                {"chanNameMain":"老师","deviceStatus":1,"chanNameMainPlayUrl":"https://mss2.sjtu.edu.cn/live/a.m3u8?auth_key=signed","mainTokenStr":"a+b=="},
+                {"chanNameMain":"课件","deviceStatus":1,"chanNameMainPlayUrl":"https://mss2.sjtu.edu.cn/live/b.m3u8?auth_key=other"},
+                {"deviceStatus":0,"chanNameMainPlayUrl":"https://mss2.sjtu.edu.cn/live/c.m3u8"},
+                {"chanNameMainPlayUrl":"https://mss2.sjtu.edu.cn/live/a.flv"}
+            ]}});
+        let info = live_info_from_response(&value).unwrap();
+        assert_eq!(info.tracks.len(), 2);
+        let url = Url::parse(&info.tracks[0].url).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("auth_key").unwrap(), "signed");
+        assert_eq!(query.get("account_token").unwrap(), "a+b==");
+        assert_eq!(info.tracks[1].name, "课件");
+        let mut closed = value.clone(); closed["data"]["lvcrLiveStatus"] = 0.into();
+        assert!(live_info_from_response(&closed).unwrap_err().to_string().contains("权限"));
+        closed = value.clone(); closed["timestamp"] = 200.into();
+        assert!(live_info_from_response(&closed).unwrap_err().to_string().contains("已结束"));
+        closed = value.clone(); closed["timestamp"] = 99.into();
+        assert!(live_info_from_response(&closed).unwrap_err().to_string().contains("未开始"));
+        closed = value; closed["data"]["errorMsg"] = "直播未开放".into();
+        assert!(live_info_from_response(&closed).unwrap_err().to_string().contains("直播未开放"));
+    }
+
+    #[test]
+    fn test_ppt_response_preserves_full_text_keywords_and_seek_times() {
+        // Synthetic content with the field names used by the service.
+        let response: Value = serde_json::from_str(include_str!("fixtures/ppt_ocr_response.json")).unwrap();
+        let slides = ppts_from_response(&response).unwrap();
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].create_sec, "359");
+        assert_eq!(slides[1].create_sec, "1768");
+        assert_eq!(slides[0].ocr.len(), 5);
+        assert_eq!(slides[1].ocr[1].word, "ISBN");
+        assert_eq!(slides[1].ocr_text, response["data"]["docList"][1]["ocrText"].as_str().unwrap());
+        let (text, available, untimed) = crate::app::ppt::material_timeline("videoSpace:example", &[], &slides);
+        assert!(available);
+        assert_eq!(untimed, 0);
+        assert!(text.contains("#video=videoSpace%3Aexample&t=1768"));
+        assert!(text.contains("核对标题、版本和馆藏位置"));
+        assert!(!text.contains("[仅关键词]"));
+        assert_eq!(text.matches("核对标题、版本和馆藏位置").count(), 1);
+        assert_eq!(crate::app::ppt::filter_export_slides(slides, true).0.len(), 2);
+    }
+
+    #[test]
+    fn test_ppt_animation_simplification_and_summary_keep_complete_pages_and_original_times() {
+        // De-identified sequence preserves OCR order/noise, formulas and page counters.
+        let response: Value = serde_json::from_str(include_str!("fixtures/ppt_animation_sequence.json")).unwrap();
+        let original = ppts_from_response(&response).unwrap();
+        assert_eq!(original.len(), 41);
+        assert!(!crate::model::AppConfig::default().experimental_ppt_cleanup);
+        assert_eq!(crate::app::ppt::simplify_animation_slides(original.clone(), false), (original.clone(), vec![]));
+        let (kept, notes) = crate::app::ppt::simplify_animation_slides(original, true);
+        assert_eq!(kept.len(), 38);
+        assert!(notes[0].contains("41 张 → 38 张"));
+        for time in ["995", "1555", "2555"] {
+            assert!(!kept.iter().any(|slide| slide.create_sec == time), "redundant slice {time}");
+        }
+        let complete = kept.iter().find(|slide| slide.create_sec == "1061").unwrap();
+        assert_eq!(complete.animation_start_sec.as_deref(), Some("995"));
+        assert!(complete.ocr_text.contains("负采样（negative sampling）"));
+        // Complete annotated formula pages are retained, while different pages and
+        // different section highlights are preserved even when their titles match.
+        for time in ["80", "415", "418", "824", "1148", "1418", "2743", "2865", "402", "429", "434", "444", "514", "683", "736", "790", "911", "1800", "2867", "952", "2382", "2541", "2913"] {
+            assert!(kept.iter().any(|slide| slide.create_sec == time));
+        }
+        let all_times: std::collections::HashSet<_> = kept.iter().flat_map(|slide| std::iter::once(slide.create_sec.clone()).chain(slide.related_slide_secs.iter().cloned())).collect();
+        assert_eq!(all_times.len(), 41);
+        let subtitles = vec![CanvasVideoSubTitle { bg: 995000, res: "这一页开始讲优化".into(), ..Default::default() }];
+        let (text, available, _) = crate::app::ppt::material_timeline("videoSpace:example", &subtitles, &kept);
+        assert!(available);
+        assert!(text.contains("&t=995) [字幕] 这一页开始讲优化"));
+        assert!(!text.contains("&t=995) [PPT OCR"));
+        assert!(text.contains("&t=1061) [PPT OCR"));
+        assert!(!text.contains("逐步展开"));
+        assert!(text.contains("&t=2743)"));
+        assert!(text.contains("&t=2867)"));
+        assert!(!text.contains("&t=1555)"));
+        assert!(text.contains("&t=1800) [PPT OCR"));
+        assert!(text.contains("&t=418)"));
+        assert!(text.contains("&t=434) [PPT OCR"));
+        assert_eq!(text.matches("[PPT OCR]").count(), 37); // one image has no OCR
+        // The same resulting slice list is the input to PDF export.
+        assert_eq!(crate::app::ppt::filter_export_slides(kept, false).0.len(), 38);
+    }
+
+    #[test]
+    fn test_ppt_full_text_only_and_zero_seek_time_take_precedence() {
+        let slides = ppts_from_response(&serde_json::json!({"data": {"docList": [
+            {"imageSeekTime": 0, "createSec": 999, "imageSnapshotTime": "1970-01-01 08:00:00", "ocrText": "全文独立可用", "textKeywordList": []},
+            {"imageSnapshotTime": "1970-01-01 08:00:02", "ocrText": "时间未知全文"}
+        ]}})).unwrap();
+        assert_eq!(slides.len(), 2);
+        assert_eq!(slides[0].create_sec, "0");
+        assert_eq!(slides[1].create_sec, "");
+        let (text, available, untimed) = crate::app::ppt::material_timeline("canvas:0", &[], &slides);
+        assert!(available);
+        assert_eq!(untimed, 1);
+        assert!(text.contains("&t=0)"));
+        assert!(text.contains("全文独立可用"));
+        assert!(text.contains("时间未知全文"));
+        assert!(!text.contains("&t=999"));
+    }
+
+    #[test]
+    fn test_ppt_preserves_ocr_across_service_shapes_and_missing_images() {
+        let slides = ppts_from_response(&serde_json::json!({"data": {"docList": [
+            {"createSec": 356, "imageUrl": "https://example.test/one.png", "ocr": [{"word": "语法分析"}, {"word": "解析树"}]},
+            {"createSec": "00:07:01", "pptImgUrl": "https://example.test/two.png", "ocr": ["Parser", {"text": "规约"}, null, {"word": ""}]},
+            {"time": "bad", "ocr": "[{\"word\":\"无图片文字\"}]"},
+            {"createSec": 0, "url": "https://example.test/empty.png"}
+        ]}})).unwrap();
+        assert_eq!(slides.len(), 4);
+        assert_eq!(slides[0].create_sec, "356");
+        assert_eq!(slides[0].ocr[0].word, "语法分析");
+        assert_eq!(slides[1].ocr.len(), 2);
+        assert_eq!(slides[1].ocr[1].word, "规约");
+        assert_eq!(slides[2].ocr[0].word, "无图片文字");
+        assert_eq!(slides[2].ppt_img_url, None);
+        assert!(slides[3].ocr.is_empty());
+    }
+
+    #[test]
+    fn test_video_ai_availability_uses_material_hints_without_material_probes() {
+        let records = serde_json::json!({"data": {"records": [
+            {"id": 1, "vodStatus": 5, "courTransferFlag": 0, "coursePptSliceStatus": 0, "transcriptOptimizeTaskStatus": 0},
+            {"id": 2, "vodStatus": 6, "courTransferFlag": 1, "coursePptSliceStatus": 0},
+            {"id": 3, "vodStatus": 5, "courTransferFlag": false, "coursePptSliceStatus": 5},
+            {"id": 4, "transcriptOptimizeTaskStatus": 3},
+            {"id": 5, "courTransferFlag": "0", "coursePptSliceStatus": "4", "transcriptOptimizeTaskStatus": "1"},
+            {"id": 6, "courTransferFlag": true},
+            {"id": 7, "vodStatus": 5},
+            {"id": 8, "courTransferFlag": null, "coursePptSliceStatus": null, "transcriptOptimizeTaskStatus": null},
+            {"id": 9, "courTransferFlag": 0, "coursePptSliceStatus": 0, "transcriptOptimizeTaskStatus": 3},
+            {"id": 10, "courTransferFlag": 0},
+            {"id": 11, "coursePptSliceStatus": 4}
+        ]}});
+        let videos = canvas_videos_from_response(&records, VideoSource::Canvas).unwrap();
+        assert_eq!(videos.iter().map(|v| v.ai_available).collect::<Vec<_>>(),
+            vec![Some(false), Some(true), Some(true), None, Some(false), Some(true), None, None, Some(false), None, None]);
+        assert!(videos[0].playable);
+        assert!(!videos[1].playable);
+        let space = canvas_videos_from_response(&records, VideoSource::VideoSpace).unwrap();
+        assert_eq!(space[2].ai_available, Some(true));
+        let mut serialized = serde_json::to_value(&videos[0]).unwrap();
+        assert_eq!(serialized["aiAvailable"], false);
+        serialized.as_object_mut().unwrap().remove("aiAvailable");
+        assert_eq!(serde_json::from_value::<CanvasVideo>(serialized).unwrap().ai_available, None);
+    }
+
+    #[test]
+    fn test_video_ai_availability_does_not_depend_on_transcript_optimization() {
+        for optimized_status in 0..=6 {
+            // Raw transcription remains usable even if optimization failed.
+            assert_eq!(canvas_video_ai_available(&serde_json::json!({
+                "courTransferFlag": 1, "coursePptSliceStatus": 0,
+                "transcriptOptimizeTaskStatus": optimized_status,
+            })), Some(true));
+            // OCR-only materials are sufficient for the existing summary workflow.
+            assert_eq!(canvas_video_ai_available(&serde_json::json!({
+                "courTransferFlag": 0, "coursePptSliceStatus": 5,
+                "transcriptOptimizeTaskStatus": optimized_status,
+            })), Some(true));
+            // Optimization success alone must not declare materials available.
+            assert_eq!(canvas_video_ai_available(&serde_json::json!({
+                "courTransferFlag": 0, "coursePptSliceStatus": 0,
+                "transcriptOptimizeTaskStatus": optimized_status,
+            })), Some(false));
+            assert_eq!(canvas_video_ai_available(&serde_json::json!({
+                "transcriptOptimizeTaskStatus": optimized_status,
+            })), None);
+        }
+    }
 
     #[test]
     fn test_video_space_courses_use_teaching_class_ids() {
@@ -1728,7 +1940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires access to the live jAccount login service"]
+    #[ignore = "requires the live SJTU authentication service"]
     async fn test_get_uuid() -> Result<()> {
         let cli = Client::default();
         let uuid = cli.get_uuid().await?;
@@ -1740,43 +1952,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_video() -> Result<()> {
-        const VIDEO_BODY: &str = "mock video payload";
-
-        struct TestOutput(PathBuf);
-
-        impl Drop for TestOutput {
-            fn drop(&mut self) {
-                let _ = fs::remove_file(&self.0);
+        use httpmock::prelude::*;
+        // Exercise both range and single-stream downloads without external media.
+        let original = vec![0x5a; num_cpus::get() * 8 + 1];
+        for supports_range in [false, true] {
+            let server = MockServer::start();
+            let probe = server.mock(|when, then| {
+                when.method(GET).path("/video.mp4").header("Range", "bytes=0-0");
+                if supports_range {
+                    then.status(206).header("Content-Range", format!("bytes 0-0/{}", original.len())).body(&original[..1]);
+                } else {
+                    then.status(200).body(&original);
+                }
+            });
+            let mut chunks = Vec::new();
+            if supports_range {
+                let size = original.len() as u64;
+                let chunk_size = size / num_cpus::get() as u64;
+                for index in 0..num_cpus::get() {
+                    let begin = index as u64 * chunk_size;
+                    let end = (begin + VIDEO_CHUNK_SIZE).min(size - 1);
+                    chunks.push(server.mock(|when, then| {
+                        when.method(GET).path("/video.mp4").header("Range", format!("bytes={begin}-{}", begin + VIDEO_CHUNK_SIZE));
+                        then.status(206).header("Content-Range", format!("bytes {begin}-{end}/{size}"))
+                            .body(&original[begin as usize..=end as usize]);
+                    }));
+                }
+            } else {
+                chunks.push(server.mock(|when, then| {
+                    when.method(GET).path("/video.mp4");
+                    then.status(200).body(&original);
+                }));
             }
+            let output = crate::utils::file::TempFile::with_extension(std::env::temp_dir().to_string_lossy().into_owned(), "mp4")?;
+            let cli = Arc::new(Client::new_without_proxy(server.base_url().as_str(), "", "", "", None));
+            let info = VideoPlayInfo { rtmp_url_hdv: server.url("/video.mp4"), ..Default::default() };
+            cli.download_video(&info, output.path(), |_| {}).await?;
+            assert_eq!(fs::read(output.path())?, original);
+            probe.assert_hits(1);
+            for chunk in chunks { chunk.assert_hits(1); }
         }
-
-        let _ = tracing_subscriber::fmt::try_init();
-        let server = MockServer::start();
-        let video_mock = server.mock(|when, then| {
-            when.method(GET).path("/video.mp4");
-            then.status(200)
-                .header("Content-Type", "video/mp4")
-                .header("Content-Length", "18")
-                .body(VIDEO_BODY);
-        });
-        let cli = Arc::new(Client::new_without_proxy(BASE_URL, "", "", "", None));
-        let video_url = server.url("/video.mp4");
-        let output = TestOutput(
-            std::env::temp_dir().join(format!("canvas-video-test-{}.mp4", Uuid::new_v4())),
-        );
-        let save_path = output.0.to_string_lossy().into_owned();
-        let video_info = VideoPlayInfo {
-            rtmp_url_hdv: video_url,
-            ..Default::default()
-        };
-        let cli_cloned = cli.clone();
-        cli_cloned
-            .download_video(&video_info, &save_path, |_| {})
-            .await?;
-
-        let downloaded = fs::read(&save_path)?;
-        assert_eq!(VIDEO_BODY.as_bytes(), downloaded);
-        video_mock.assert_hits(2);
         Ok(())
     }
 

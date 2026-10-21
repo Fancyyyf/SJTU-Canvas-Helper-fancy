@@ -41,12 +41,12 @@ impl Client {
             .unwrap();
         let base_url = RwLock::new(base_url.into());
         let token = RwLock::new("".to_owned());
-        let llm_cli = llm::chat::new_llm_client(
+        let llm_cli = llm::chat::LlmRuntime::new(llm::chat::EffectiveLlmConfig::from_parts(
             llm_api_key.into(),
             llm_base_url.into(),
             llm_model.into(),
             llm_temperature,
-        )
+        ))
         .unwrap();
         let file_parser = file_parser::new_generic_file_reader();
         Self {
@@ -67,6 +67,21 @@ impl Client {
         llm_model: S,
         llm_temperature: Option<f32>,
     ) -> Self {
+        Self::new_with_llm_config(
+            base_url,
+            llm::chat::EffectiveLlmConfig::from_parts(
+                llm_api_key.into(),
+                llm_base_url.into(),
+                llm_model.into(),
+                llm_temperature,
+            ),
+        )
+    }
+
+    pub fn new_with_llm_config<S: Into<String>>(
+        base_url: S,
+        llm_config: llm::chat::EffectiveLlmConfig,
+    ) -> Self {
         let jar = Arc::new(cookie::Jar::default());
         let cli = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36")
@@ -75,13 +90,7 @@ impl Client {
             .unwrap();
         let base_url = RwLock::new(base_url.into());
         let token = RwLock::new("".to_owned());
-        let llm_cli = llm::chat::new_llm_client(
-            llm_api_key.into(),
-            llm_base_url.into(),
-            llm_model.into(),
-            llm_temperature,
-        )
-        .unwrap();
+        let llm_cli = llm::chat::LlmRuntime::new(llm_config).unwrap();
         let file_parser = file_parser::new_generic_file_reader();
         Self {
             cli,
@@ -94,20 +103,12 @@ impl Client {
         }
     }
 
-    pub async fn set_llm_api_key<S: Into<String>>(&self, api_key: S) {
-        self.llm_cli.set_api_key(api_key.into()).await;
+    pub async fn reconfigure_llm(&self, config: llm::chat::EffectiveLlmConfig) -> Result<()> {
+        self.llm_cli.reconfigure(config).await
     }
 
-    pub async fn set_llm_base_url<S: Into<String>>(&self, base_url: S) {
-        self.llm_cli.set_base_url(base_url.into()).await;
-    }
-
-    pub async fn set_llm_model<S: Into<String>>(&self, model: S) {
-        self.llm_cli.set_model(model.into()).await;
-    }
-
-    pub async fn set_llm_temperature(&self, temperature: Option<f32>) {
-        self.llm_cli.set_temperature(temperature).await;
+    pub async fn llm_snapshot(&self) -> Result<llm::chat::LlmSnapshot> {
+        self.llm_cli.snapshot().await
     }
 
     pub fn set_debug_mode(&self, enabled: bool) {
@@ -443,6 +444,39 @@ impl Client {
             course_id
         );
         self.list_items(&url, token).await
+    }
+
+    pub async fn get_file_preview_session_url(&self, file_id: i64, token: &str) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct WebSessionResponse {
+            session_url: String,
+        }
+
+        let base_url = self.base_url.read().await.trim_end_matches('/').to_owned();
+        let file_url = format!("{base_url}/api/v1/files/{file_id}");
+        let file: File = self
+            .get_json_with_token(
+                &file_url,
+                Some(&[("include[]", "enhanced_preview_url")]),
+                token,
+            )
+            .await?;
+        let preview_url = file.preview_url.ok_or_else(|| {
+            AppError::FilePreview("Canvas did not provide an enhanced preview URL".to_owned())
+        })?;
+        let absolute_preview_url = reqwest::Url::parse(&base_url)
+            .and_then(|base| base.join(&preview_url))
+            .map_err(|error| AppError::FilePreview(error.to_string()))?;
+
+        let session_url = format!("{base_url}/login/session_token");
+        let session: WebSessionResponse = self
+            .get_json_with_token(
+                &session_url,
+                Some(&[("return_to", absolute_preview_url.as_str())]),
+                token,
+            )
+            .await?;
+        Ok(session.session_url)
     }
 
     pub async fn list_course_images(&self, course_id: i64, token: &str) -> Result<Vec<File>> {
@@ -995,6 +1029,92 @@ mod mock_tests {
     }
 
     #[tokio::test]
+    async fn test_get_file_preview_session_url_creates_web_session() {
+        let server = MockServer::start();
+        let token = "test_token_12345";
+        let file_id = 42i64;
+        let preview_path = "/courses/7/files/42/file_preview?annotate&verifier=test-verifier";
+        let return_to = format!("{}{}", server.base_url(), preview_path);
+        let expected_session_url = format!("{}/opaque-preview-session", server.base_url());
+
+        let file_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("/api/v1/files/{file_id}"))
+                .query_param("include[]", "enhanced_preview_url")
+                .header("Authorization", format!("Bearer {token}"));
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .json_body(json!({
+                    "id": file_id,
+                    "uuid": "file-uuid",
+                    "folder_id": 9,
+                    "display_name": "slides.pptx",
+                    "filename": "slides.pptx",
+                    "url": format!("{}/files/{file_id}/download", server.base_url()),
+                    "size": 1234,
+                    "locked": false,
+                    "mime_class": "ppt",
+                    "content-type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "preview_url": preview_path
+                }));
+        });
+        let session_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/login/session_token")
+                .query_param("return_to", return_to.as_str())
+                .header("Authorization", format!("Bearer {token}"));
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .json_body(json!({ "session_url": expected_session_url }));
+        });
+        let client = create_test_client(&server.base_url());
+        let session_url = client
+            .get_file_preview_session_url(file_id, token)
+            .await
+            .unwrap();
+
+        assert_eq!(session_url, expected_session_url);
+        file_mock.assert();
+        session_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_file_preview_session_url_requires_enhanced_preview() {
+        let server = MockServer::start();
+        let token = "test_token_12345";
+        let file_id = 42i64;
+
+        let file_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("/api/v1/files/{file_id}"))
+                .query_param("include[]", "enhanced_preview_url");
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .json_body(json!({
+                    "id": file_id,
+                    "uuid": "file-uuid",
+                    "folder_id": 9,
+                    "display_name": "slides.pptx",
+                    "filename": "slides.pptx",
+                    "url": format!("{}/files/{file_id}/download", server.base_url()),
+                    "size": 1234,
+                    "locked": false,
+                    "mime_class": "ppt",
+                    "content-type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                }));
+        });
+
+        let client = create_test_client(&server.base_url());
+        let error = client
+            .get_file_preview_session_url(file_id, token)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("enhanced preview URL"));
+        file_mock.assert();
+    }
+
+    #[tokio::test]
     async fn test_list_courses() {
         let server = MockServer::start();
         let token = "test_token_12345";
@@ -1136,6 +1256,45 @@ mod mock_tests {
 
         mock.assert();
     }
+
+    #[tokio::test]
+    async fn test_list_submissions_paginates_without_live_canvas() {
+        let server = MockServer::start();
+        let mut pages = Vec::new();
+        for page in 1..=3 {
+            pages.push(server.mock(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/courses/7/assignments/8/submissions")
+                    .header("Authorization", "Bearer test-token")
+                    .query_param("include[]", "submission_comments")
+                    .query_param("per_page", "100")
+                    .query_param("page", page.to_string());
+                let body = if page < 3 {
+                    json!([{"id": page, "assignment_id": 8, "user_id": 10,
+                        "late": false, "workflow_state": "submitted"}])
+                } else { json!([]) };
+                then.status(200).json_body(body);
+            }));
+        }
+        let submissions = create_test_client(&server.base_url())
+            .list_course_assignment_submissions(7, 8, "test-token").await.unwrap();
+        assert_eq!(submissions.iter().map(|item| item.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(submissions.iter().all(|item| item.assignment_id == 8));
+        for page in pages { page.assert_hits(1); }
+    }
+
+    #[tokio::test]
+    async fn test_list_submissions_propagates_http_failure_without_live_canvas() {
+        let server = MockServer::start();
+        let denied = server.mock(|when, then| {
+            when.method(GET).path("/api/v1/courses/7/assignments/8/submissions");
+            then.status(401);
+        });
+        assert!(create_test_client(&server.base_url())
+            .list_course_assignment_submissions(7, 8, "test-token").await.is_err());
+        denied.assert_hits(1);
+    }
+
 
     #[tokio::test]
     async fn test_update_grade_with_grade_and_comment() {
@@ -1315,7 +1474,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_get_me() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1327,7 +1486,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_list_courses() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1349,7 +1508,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_list_assignments() -> Result<()> {
         tracing_subscriber::fmt::init();
         let token = get_token_from_env();
@@ -1375,7 +1534,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_list_users() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1409,7 +1568,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_list_submissions() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());
@@ -1437,7 +1596,7 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "requires CANVAS_TOKEN and access to the live Canvas API"]
+    #[ignore = "requires a live Canvas token and network access"]
     async fn test_list_colors() -> Result<()> {
         let token = get_token_from_env();
         assert!(!token.is_empty());

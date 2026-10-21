@@ -17,6 +17,7 @@ import SyllabusPage from "../page/syllabus";
 import UsersPage from "../page/users";
 import VideoPage from "../page/video";
 import HomePage from "../page/home";
+import RetainedVideoWorkspace from "./retained_video_workspace";
 
 // 路由配置对象
 const routesConfig = [
@@ -36,12 +37,13 @@ const routesConfig = [
     { path: "/submissions", element: <SubmissionsPage /> },
     { path: "/syllabus", element: <SyllabusPage /> },
     { path: "/users", element: <UsersPage /> },
-    { path: "/video", element: <VideoPage /> },
+    { path: "/video", element: null },
 ];
 
 export default function AppRouter() {
     return (
         <BrowserRouter>
+            <RetainedVideoWorkspace>{(active) => <VideoPage active={active} />}</RetainedVideoWorkspace>
             <Routes>
                 <Route index element={<Navigate to="/home" />} />
                 {routesConfig.map((route, index) => (

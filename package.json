@@ -1,7 +1,7 @@
 {
   "name": "canvas",
   "private": true,
-  "version": "3.0.11",
+  "version": "3.0.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
+    "check:rust": "node script/check-rust.mjs",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -50,6 +51,7 @@
     "echarts": "^5.5.0",
     "echarts-for-react": "^3.0.5",
     "highlight.js": "^11.11.1",
+    "hls.js": "^1.7.3",
     "html2canvas": "^1.4.1",
     "js-base64": "^3.7.7",
     "jspdf": "^4.2.1",
@@ -101,8 +103,8 @@
     "rollup-plugin-copy": "^3.5.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.61.1",
-    "vite": "^5.0.0",
-    "vite-plugin-static-copy": "^1.0.1",
+    "vite": "7.3.1",
+    "vite-plugin-static-copy": "3.2.0",
     "vitest": "^4.1.9"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
