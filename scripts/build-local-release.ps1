@@ -22,8 +22,16 @@ try {
   }
 
   New-Item -ItemType Directory -Path $outputRelease -Force | Out-Null
+  $version = (Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json).version
   foreach ($executable in $executables) {
-    Copy-Item -LiteralPath $executable.FullName -Destination $outputRelease -Force
+    $versionedName = "{0}_{1}{2}" -f $executable.BaseName, $version, $executable.Extension
+    Copy-Item -LiteralPath $executable.FullName -Destination (Join-Path $outputRelease $versionedName) -Force
+    try {
+      Copy-Item -LiteralPath $executable.FullName -Destination $outputRelease -Force
+    }
+    catch [System.IO.IOException] {
+      Write-Warning "The unversioned executable is in use; use $versionedName instead."
+    }
   }
 
   $bundleSource = Join-Path $sourceRelease "bundle"
