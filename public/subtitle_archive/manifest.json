@@ -1,0 +1,130 @@
+[
+    {
+        "stem":  "cse1",
+        "courseId":  136645
+    },
+    {
+        "stem":  "cse10",
+        "courseId":  160393
+    },
+    {
+        "stem":  "cse2",
+        "courseId":  134920
+    },
+    {
+        "stem":  "cse3",
+        "courseId":  139922
+    },
+    {
+        "stem":  "cse4",
+        "courseId":  140140
+    },
+    {
+        "stem":  "cse5",
+        "courseId":  149430
+    },
+    {
+        "stem":  "cse6",
+        "courseId":  147150
+    },
+    {
+        "stem":  "cse7",
+        "courseId":  153631
+    },
+    {
+        "stem":  "cse8",
+        "courseId":  153906
+    },
+    {
+        "stem":  "cse9",
+        "courseId":  162627
+    },
+    {
+        "stem":  "economic_6_2_1",
+        "courseId":  2450899
+    },
+    {
+        "stem":  "economic_6_2_2",
+        "courseId":  2450900
+    },
+    {
+        "stem":  "economic_6_2_3",
+        "courseId":  2450901
+    },
+    {
+        "stem":  "ics_5_18_class2",
+        "courseId":  2430098
+    },
+    {
+        "stem":  "web2_1_1",
+        "courseId":  134730
+    },
+    {
+        "stem":  "web2_1_2",
+        "courseId":  135373
+    },
+    {
+        "stem":  "web2_2_1",
+        "courseId":  140967
+    },
+    {
+        "stem":  "web2_2_2",
+        "courseId":  141144
+    },
+    {
+        "stem":  "web2_3_1",
+        "courseId":  143037
+    },
+    {
+        "stem":  "web2_3_2",
+        "courseId":  143265
+    },
+    {
+        "stem":  "web2_4_1",
+        "courseId":  146916
+    },
+    {
+        "stem":  "web2_4_2",
+        "courseId":  147793
+    },
+    {
+        "stem":  "web2_5_1",
+        "courseId":  160164
+    },
+    {
+        "stem":  "web2_5_2",
+        "courseId":  161034
+    },
+    {
+        "stem":  "web2_6_1",
+        "courseId":  171116
+    },
+    {
+        "stem":  "web2_6_2",
+        "courseId":  171327
+    },
+    {
+        "stem":  "web2_7_1",
+        "courseId":  172284
+    },
+    {
+        "stem":  "web2_7_2",
+        "courseId":  173161
+    },
+    {
+        "stem":  "web_5_12_1",
+        "courseId":  2422074
+    },
+    {
+        "stem":  "web_5_14_2",
+        "courseId":  2425910
+    },
+    {
+        "stem":  "web_6_16_1",
+        "courseId":  2467171
+    },
+    {
+        "stem":  "web_6_16_2",
+        "courseId":  2467172
+    }
+]

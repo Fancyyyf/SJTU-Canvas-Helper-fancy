@@ -17,6 +17,7 @@ import PsychologyRoundedIcon from "@mui/icons-material/PsychologyRounded";
 import QrCode2RoundedIcon from "@mui/icons-material/QrCode2Rounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRoundedIcon from "@mui/icons-material/SmartDisplayRounded";
+import ClosedCaptionRoundedIcon from "@mui/icons-material/ClosedCaptionRounded";
 import TimelineRoundedIcon from "@mui/icons-material/TimelineRounded";
 import DeveloperBoardRoundedIcon from "@mui/icons-material/DeveloperBoardRounded";
 import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
@@ -76,6 +77,7 @@ const navigationItems = [
   { key: "submissions", label: "提交批改", icon: <CloudDownloadRoundedIcon />, path: "/submissions" },
   { key: "syllabus", label: "教学大纲", icon: <AutoStoriesRoundedIcon />, path: "/syllabus" },
   { key: "video", label: "视频管理", icon: <SmartDisplayRoundedIcon />, path: "/video" },
+  { key: "subtitle-archive", label: "字幕工作台", icon: <ClosedCaptionRoundedIcon />, path: "/subtitle-archive" },
   { key: "qrcode", label: "二维码管理", icon: <QrCode2RoundedIcon />, path: "/qrcode" },
   { key: "annual", label: "年度总结", icon: <TimelineRoundedIcon />, path: "/annual" },
   { key: "settings", label: "系统设置", icon: <SettingsRoundedIcon />, path: "/settings" },
@@ -94,6 +96,7 @@ const pageTitleMap: Record<string, string> = {
   submissions: "提交批改",
   syllabus: "教学大纲",
   video: "视频管理",
+  "subtitle-archive": "字幕工作台",
   qrcode: "二维码管理",
   annual: "年度总结",
   settings: "系统设置",

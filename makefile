@@ -22,7 +22,7 @@ check:
 	cd $(TAURI_SRC_DIR) && cargo check --workspace --all-targets --all-features
 
 version:
-	@python3 script/bump_version.py "$(firstword $(filter-out $@,$(MAKECMDGOALS)))"
+	@python3 scripts/bump_version.py "$(firstword $(filter-out $@,$(MAKECMDGOALS)))"
 
 # Ignore all non-targets
 %:

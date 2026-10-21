@@ -10,6 +10,9 @@ use crate::{
 };
 // Apis for course video
 impl App {
+    pub async fn get_archive_subtitle_bytes(&self, canvas_course_id: i64) -> Result<Vec<u8>> {
+        self.client.get_subtitle_response_bytes(canvas_course_id, false).await
+    }
     pub async fn get_uuid(&self) -> Result<Option<String>> {
         self.client.get_uuid().await
     }

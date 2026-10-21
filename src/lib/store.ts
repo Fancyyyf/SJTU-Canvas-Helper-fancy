@@ -3,6 +3,7 @@ import { AppConfig, TermSelection } from "./model";
 
 const TERM_FILTER_STORAGE_KEY = "canvas-helper.selected-term";
 const SIDEBAR_ITEMS_STORAGE_KEY = "canvas-helper.sidebar-items";
+const SUBTITLE_ARCHIVE_NAV_MIGRATION_KEY = "canvas-helper.subtitle-archive-nav-added";
 
 export const DEFAULT_SIDEBAR_ITEM_KEYS = [
     "agent",
@@ -16,6 +17,7 @@ export const DEFAULT_SIDEBAR_ITEM_KEYS = [
     "submissions",
     "syllabus",
     "video",
+    "subtitle-archive",
     "qrcode",
     "annual",
     "settings",
@@ -47,7 +49,13 @@ function readStoredSidebarItems(): string[] {
             (key): key is string =>
                 typeof key === "string" && DEFAULT_SIDEBAR_ITEM_KEYS.includes(key)
         );
-        return Array.from(new Set(validKeys));
+        const keys = Array.from(new Set(validKeys));
+        if (localStorage.getItem(SUBTITLE_ARCHIVE_NAV_MIGRATION_KEY) !== "true") {
+            if (!keys.includes("subtitle-archive")) keys.push("subtitle-archive");
+            localStorage.setItem(SIDEBAR_ITEMS_STORAGE_KEY, JSON.stringify(keys));
+            localStorage.setItem(SUBTITLE_ARCHIVE_NAV_MIGRATION_KEY, "true");
+        }
+        return keys;
     } catch {
         return DEFAULT_SIDEBAR_ITEM_KEYS;
     }

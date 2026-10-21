@@ -1,2 +1,2 @@
 npx lint-staged
-node script/check-rust.mjs --staged
+node scripts/check-rust.mjs --staged

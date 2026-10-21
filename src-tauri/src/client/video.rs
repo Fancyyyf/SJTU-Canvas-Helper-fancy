@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::Write,
     sync::Arc,
@@ -1236,24 +1236,42 @@ impl Client {
         source: VideoSource,
     ) -> Result<Vec<CanvasVideo>> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/subject_vod_list_new");
-        let resp = self
-            .cli
-            .get(url)
-            .header(REFERER, RESOURCE_MANAGE_UI_URL)
-            .header("jwt-token", token)
-            .query(&[
-                ("page.pageIndex", "1".to_string()),
-                ("page.pageSize", "1000".to_string()),
-                ("teclIds", teaching_class_id.to_string()),
-                ("page.orders[0].asc", "false".to_string()),
-                ("page.orders[0].field", "courBeginTime".to_string()),
-                ("schoolOpenStatusFlag", "false".to_string()),
-            ])
-            .send()
-            .await?
-            .error_for_status()?;
-        let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
-        canvas_videos_from_response(&value, source)
+        let mut videos = Vec::new();
+        let mut seen = HashSet::new();
+        for page in 1..=100 {
+            let resp = self
+                .cli
+                .get(&url)
+                .header(REFERER, RESOURCE_MANAGE_UI_URL)
+                .header("jwt-token", &token)
+                .query(&[
+                    ("page.pageIndex", page.to_string()),
+                    ("page.pageSize", "1000".to_string()),
+                    ("teclIds", teaching_class_id.to_string()),
+                    ("page.orders[0].asc", "false".to_string()),
+                    ("page.orders[0].field", "courBeginTime".to_string()),
+                    ("schoolOpenStatusFlag", "false".to_string()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?;
+            let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
+            let records = api_data(&value)?.get("records").and_then(Value::as_array)
+                .ok_or_else(|| AppError::VideoDownloadError("Video list is missing records".into()))?;
+            let empty = records.is_empty();
+            let page_len = records.len();
+            let batch = canvas_videos_from_response(&value, source)?;
+            let previous_len = videos.len();
+            videos.extend(batch.into_iter().filter(|video| seen.insert(video.video_id.clone())));
+            let total = value_as_i64(api_data(&value)?.get("rowCount"));
+            if empty || total.map_or(page_len < 1000, |total| videos.len() as i64 >= total) {
+                return Ok(videos);
+            }
+            if previous_len == videos.len() {
+                return Err(AppError::VideoDownloadError("Video list pagination made no progress".into()));
+            }
+        }
+        Err(AppError::VideoDownloadError("Video list pagination limit reached".into()))
     }
 
     pub async fn get_oauth_consumer_key(&self) -> Result<Option<String>> {
@@ -1494,18 +1512,38 @@ impl Client {
         &self,
         canvas_course_id: i64,
     ) -> Result<CanvasVideoSubTitleResponseBody> {
+        let value = self.get_subtitle_response(canvas_course_id, true).await?;
+        subtitles_from_response(&value)
+    }
+
+    pub async fn get_subtitle_response(
+        &self,
+        canvas_course_id: i64,
+        use_original: bool,
+    ) -> Result<Value> {
+        let bytes = self.get_subtitle_response_bytes(canvas_course_id, use_original).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub async fn get_subtitle_response_bytes(
+        &self,
+        canvas_course_id: i64,
+        use_original: bool,
+    ) -> Result<Vec<u8>> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/course/ai/translate/{canvas_course_id}");
         let resp = self
             .cli
             .get(url)
-            .query(&[("useOriginal", true)])
+            .query(&[("useOriginal", use_original)])
             .header("jwt-token", self.token.read().await.as_str())
             .header(REFERER, RESOURCE_MANAGE_UI_URL)
             .send()
             .await?
             .error_for_status()?;
-        let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
-        subtitles_from_response(&value)
+        let bytes = resp.bytes().await?;
+        let value: Value = serde_json::from_slice(&bytes)?;
+        subtitles_from_response(&value)?;
+        Ok(bytes.to_vec())
     }
 
     // TODO: Choose a Version & Convert to SRT

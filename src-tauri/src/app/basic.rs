@@ -1706,7 +1706,9 @@ mod live_proxy_tests {
         let app = App {
             client: Arc::new(Client::new_without_proxy("http://127.0.0.1", "", "", "", None)),
             current_account: Default::default(), config: Default::default(),
-            handle: Default::default(), mcp_handle: Default::default(), cache: Default::default(),
+            handle: Default::default(), mcp_handle: Default::default(),
+            attendance_handle: Default::default(), attendance_status: Default::default(),
+            cache: Default::default(),
         };
         app.config.write().await.proxy_port = port;
         let (live, recording) = tokio::join!(app.prepare_proxy(), app.prepare_proxy());

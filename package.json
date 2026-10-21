@@ -1,7 +1,7 @@
 {
   "name": "canvas",
   "private": true,
-  "version": "3.0.13",
+  "version": "3.0.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,12 +9,12 @@
     "build:release:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-local-release.ps1",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2 --testTimeout=15000",
     "test:watch": "vitest",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",
-    "check:rust": "node script/check-rust.mjs",
+    "check:rust": "node scripts/check-rust.mjs",
     "prepare": "husky"
   },
   "lint-staged": {

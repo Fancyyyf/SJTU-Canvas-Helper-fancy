@@ -10,7 +10,13 @@ import { resetVideoWorkspace } from "../../lib/video_workspace";
 
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: async () => "test" }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ open: vi.fn() }));
-vi.mock("../../lib/hooks", () => ({ useConfigSelector: (selector: (state: unknown) => unknown) => selector({ config: { data: {} } }) }));
+vi.mock("../../lib/hooks", () => ({
+  useConfigDispatch: () => vi.fn(),
+  useConfigSelector: (selector: (state: unknown) => unknown) => selector({
+    config: { data: {} },
+    navigation: { visibleItemKeys: ["video", "settings"] },
+  }),
+}));
 vi.mock("../../lib/task_hooks", () => ({ useTasks: () => [] }));
 vi.mock("../../lib/task_manager", () => ({ isTaskActive: () => false, taskManager: { markCompletionsRead: vi.fn() } }));
 vi.mock("../../lib/message", () => ({ useAppMessage: () => [{}, null] }));

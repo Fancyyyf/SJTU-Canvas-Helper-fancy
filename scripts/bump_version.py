@@ -7,63 +7,63 @@ import os
 def update_package_json(version):
     """Update version in package.json"""
     package_json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'package.json')
-    
+
     with open(package_json_path, 'r') as f:
         data = json.load(f)
-    
+
     old_version = data['version']
     data['version'] = version
-    
+
     with open(package_json_path, 'w') as f:
         json.dump(data, f, indent=2)
-    
+
     print(f"Updated package.json: {old_version} -> {version}")
 
 def update_cargo_toml(version):
     """Update version in src-tauri/Cargo.toml"""
     cargo_toml_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src-tauri', 'Cargo.toml')
-    
+
     with open(cargo_toml_path, 'r') as f:
         lines = f.readlines()
-    
+
     in_package_section = False
     old_version = None
-    
+
     for i, line in enumerate(lines):
         if line.strip() == '[package]':
             in_package_section = True
             continue
-        
+
         if in_package_section and line.strip().startswith('['):
             in_package_section = False
             continue
-        
+
         if in_package_section and line.strip().startswith('version = '):
             old_version = line.strip().split('"')[1]
             lines[i] = f'version = "{version}"\n'
             break
-    
+
     if old_version is None:
         raise Exception("Could not find version in [package] section of Cargo.toml")
-    
+
     with open(cargo_toml_path, 'w') as f:
         f.writelines(lines)
-    
+
     print(f"Updated src-tauri/Cargo.toml: {old_version} -> {version}")
 
 def update_tauri_conf(version):
     """Update version in src-tauri/tauri.conf.json"""
     tauri_conf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src-tauri', 'tauri.conf.json')
-    
+
     with open(tauri_conf_path, 'r') as f:
         data = json.load(f)
-    
+
     old_version = data['version']
     data['version'] = version
-    
+
     with open(tauri_conf_path, 'w') as f:
         json.dump(data, f, indent=2)
-    
+
     print(f"Updated src-tauri/tauri.conf.json: {old_version} -> {version}")
 
 def validate_version(version):
@@ -115,15 +115,15 @@ def update_website_htmls(version):
             f.write(content)
 
 def update_install_bat(version):
-    """Update version in script/install.bat"""
-    bat_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'script', 'install.bat')
+    """Update version in scripts/install.bat"""
+    bat_path = os.path.join(os.path.dirname(__file__), 'install.bat')
 
     with open(bat_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     match = re.search(r'set "VERSION=(\d+\.\d+\.\d+)"', content)
     if not match:
-        print("Warning: Could not find version in script/install.bat")
+        print("Warning: Could not find version in scripts/install.bat")
         return
 
     old_version = match.group(1)
@@ -132,18 +132,18 @@ def update_install_bat(version):
     with open(bat_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"Updated script/install.bat: {old_version} -> {version}")
+    print(f"Updated scripts/install.bat: {old_version} -> {version}")
 
 def update_install_mac_sh(version):
-    """Update version in script/install_mac.sh"""
-    sh_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'script', 'install_mac.sh')
+    """Update version in scripts/install_mac.sh"""
+    sh_path = os.path.join(os.path.dirname(__file__), 'install_mac.sh')
 
     with open(sh_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     match = re.search(r'VERSION="(\d+\.\d+\.\d+)"', content)
     if not match:
-        print("Warning: Could not find version in script/install_mac.sh")
+        print("Warning: Could not find version in scripts/install_mac.sh")
         return
 
     old_version = match.group(1)
@@ -152,7 +152,7 @@ def update_install_mac_sh(version):
     with open(sh_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"Updated script/install_mac.sh: {old_version} -> {version}")
+    print(f"Updated scripts/install_mac.sh: {old_version} -> {version}")
 
 def update_readme(version):
     """Update version strings in README.md"""
@@ -204,12 +204,12 @@ def main():
         print("Usage: python bump_version.py <new_version>")
         print("Example: python bump_version.py 2.0.6")
         sys.exit(1)
-    
+
     new_version = sys.argv[1]
-    
+
     if not validate_version(new_version):
         sys.exit(1)
-    
+
     try:
         update_package_json(new_version)
         update_cargo_toml(new_version)

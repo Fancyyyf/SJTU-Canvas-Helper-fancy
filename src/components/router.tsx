@@ -16,6 +16,7 @@ import SubmissionsPage from "../page/submissions";
 import SyllabusPage from "../page/syllabus";
 import UsersPage from "../page/users";
 import VideoPage from "../page/video";
+import SubtitleArchivePage from "../page/subtitle_archive";
 import HomePage from "../page/home";
 import RetainedVideoWorkspace from "./retained_video_workspace";
 
@@ -38,6 +39,7 @@ const routesConfig = [
     { path: "/syllabus", element: <SyllabusPage /> },
     { path: "/users", element: <UsersPage /> },
     { path: "/video", element: null },
+    { path: "/subtitle-archive", element: <SubtitleArchivePage /> },
 ];
 
 export default function AppRouter() {

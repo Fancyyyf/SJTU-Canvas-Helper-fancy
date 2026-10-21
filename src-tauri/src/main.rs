@@ -42,6 +42,7 @@ mod diagnostics;
 mod error;
 mod mcp;
 mod model;
+mod subtitle_archive;
 mod utils;
 
 #[macro_use]
@@ -1399,6 +1400,19 @@ async fn main() -> Result<()> {
             chat_video_materials,
             export_video_materials,
             create_video_export_directory,
+            subtitle_archive::archive_location,
+            subtitle_archive::open_archive_folder,
+            subtitle_archive::list_saved_subtitles,
+            subtitle_archive::read_saved_subtitle,
+            subtitle_archive::import_bundled_subtitle,
+            subtitle_archive::fetch_archive_subtitle,
+            subtitle_archive::read_agent_result,
+            subtitle_archive::organize_saved_subtitle,
+            subtitle_archive::get_archive_agent_prompts,
+            subtitle_archive::save_archive_agent_prompt,
+            subtitle_archive::open_archive_prompt_folder,
+            subtitle_archive::read_archive_agent_result,
+            subtitle_archive::process_archive_agent,
             download_ppt,
             list_external_module_items,
             // Apis for jbox

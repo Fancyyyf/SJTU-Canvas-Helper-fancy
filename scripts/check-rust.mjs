@@ -40,12 +40,12 @@ function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const flags = process.argv.slice(2);
   if (flags.some((flag) => !["--staged", "--lint", "--test"].includes(flag)) || (flags.includes("--lint") && flags.includes("--test"))) {
-    throw new Error("Usage: node script/check-rust.mjs [--staged] [--lint | --test]");
+    throw new Error("Usage: node scripts/check-rust.mjs [--staged] [--lint | --test]");
   }
   const mode = flags.includes("--lint") ? "lint" : flags.includes("--test") ? "test" : "all";
   if (!flags.includes("--staged")) return checkRust(root, mode);
   const paths = git(["diff", "--cached", "--name-only", "-z"], root).split("\0");
-  if (!paths.some((path) => /^(src-tauri\/|rust-toolchain\.toml$|script\/check-rust|\.github\/workflows\/rust_)/.test(path))) return;
+  if (!paths.some((path) => /^(src-tauri\/|rust-toolchain\.toml$|scripts\/check-rust|\.github\/workflows\/rust_)/.test(path))) return;
   const cache = join(root, "node_modules", ".cache", "check-rust");
   let snapshot;
   try {

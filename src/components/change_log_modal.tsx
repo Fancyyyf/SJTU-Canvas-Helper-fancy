@@ -15,6 +15,14 @@ import {
 import { alpha, useTheme } from "@mui/material/styles";
 
 const changeLogs = [{
+  version: "v3.0.14",
+  date: "2026/10/21",
+  items: [
+    "合并上游新版视频中心、课堂直播、PPT OCR、任务中心与 AI 会话改进。",
+    "保留本地签到守望、开机自启、侧边栏自定义与文件排序。",
+    "新增字幕工作台，支持原始 JSON、提取文本、Agent 整理字幕和知识点概括。",
+  ],
+}, {
   version: "v3.0.13",
   date: "2026/10/1",
   items: [
@@ -90,8 +98,8 @@ const changeLogs = [{
   date: "2026/6/21",
   items: [
     "新增教学大纲（Syllabus）页面，支持查看课程教学大纲内容。",
-    "新增 Windows 一键安装脚本 (script/install.bat)。",
-    "新增 macOS 一键安装脚本 (script/install_mac.sh)。",
+    "新增 Windows 一键安装脚本 (scripts/install.bat)。",
+    "新增 macOS 一键安装脚本 (scripts/install_mac.sh)。",
     "新增前端 ESLint + Husky 代码规范与提交检查。",
     "新增 CONTRIBUTING.md 贡献指南。",
     "新增前端 CI (ESLint + TypeScript 类型检查)。",

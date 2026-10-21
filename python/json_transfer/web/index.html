@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f3ee">
+  <title>字幕工作台 · 课程阅读与抓取</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">字</div>
+      <div><strong>字幕工作台</strong><span>COURSE TRANSCRIPT STUDIO</span></div>
+    </div>
+    <div class="topbar-right"><span class="live-dot"></span> 本地工作区 <span id="libraryTotal" class="top-count">0 份字幕</span></div>
+  </header>
+
+  <main class="layout">
+    <aside class="catalog panel" aria-label="课程目录">
+      <div class="panel-heading"><div><p class="eyebrow">LIBRARY</p><h2>课程目录</h2></div><span id="courseCount" class="count-pill">0</span></div>
+      <label class="field-label" for="courseSelect">选择课程</label>
+      <select id="courseSelect" class="select"></select>
+      <div class="catalog-meta"><span>按授课顺序排列</span><button id="refreshBtn" class="text-button" type="button">刷新</button></div>
+      <nav id="lessonList" class="lesson-list" aria-label="课次列表"></nav>
+      <div class="catalog-foot">数据保存在本机 <code>json_data/</code> 与 <code>results/</code></div>
+    </aside>
+
+    <section class="reader panel" aria-label="字幕阅读器">
+      <div class="reader-top">
+        <div><p class="eyebrow">READING ROOM</p><h1 id="lessonTitle">选择一节课开始阅读</h1><p id="lessonMeta" class="muted">按左侧目录选择字幕</p></div>
+        <div class="stepper"><button id="prevBtn" type="button" aria-label="上一节">‹</button><button id="nextBtn" type="button" aria-label="下一节">›</button></div>
+      </div>
+      <div class="reader-tools">
+        <label class="search-wrap"><span aria-hidden="true">⌕</span><input id="searchInput" type="search" placeholder="搜索本节字幕" aria-label="搜索本节字幕"></label>
+        <select id="languageSelect" class="select small-select" aria-label="字幕语言"><option value="res">优化中文</option><option value="zh">原始中文</option><option value="en">英文</option></select>
+        <div class="font-buttons" aria-label="字号"><button id="smallerBtn" type="button" title="缩小字号">A−</button><button id="largerBtn" type="button" title="放大字号">A+</button></div>
+        <button id="copyBtn" class="tool-button" type="button">复制</button>
+        <a id="downloadBtn" class="tool-button" href="#" download>下载 TXT</a>
+      </div>
+      <div class="reader-summary"><span id="resultCount">等待选择字幕</span><span id="durationText"></span></div>
+      <div id="segments" class="segments"><div class="empty-state"><div class="empty-icon">“</div><h3>让课程内容变得可读</h3><p>选择左侧一节课，按时间浏览、搜索或复制字幕。</p></div></div>
+    </section>
+
+    <aside class="control panel" aria-label="抓取控制台">
+      <div class="panel-heading"><div><p class="eyebrow">AUTOMATION</p><h2>抓取控制台</h2></div><span class="control-icon" aria-hidden="true">↗</span></div>
+      <p class="control-intro">输入一节课的播放地址，自动读取整门课的目录与字幕。</p>
+      <form id="fetchForm">
+        <label class="field-label" for="urlInput">课程播放地址</label>
+        <textarea id="urlInput" rows="4" required spellcheck="false" placeholder="https://v.sjtu.edu.cn/.../#/play-center?..." aria-describedby="urlHelp"></textarea>
+        <p id="urlHelp" class="field-help">粘贴任意一节的 play-center 地址</p>
+        <label class="field-label" for="nameInput">文件名前缀</label>
+        <input id="nameInput" type="text" value="web2" pattern="[A-Za-z0-9_-]+" required>
+        <button id="startBtn" class="primary-button" type="submit">开始抓取整门课 <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="run-card">
+        <div class="run-title"><span id="statusBadge" class="status-badge idle">待运行</span><button id="stopBtn" class="text-button" type="button" hidden>停止任务</button></div>
+        <p id="statusText">已有的字幕可以直接在左侧阅读。</p>
+        <button id="confirmLoginBtn" class="confirm-button" type="button" hidden>我已登录 Canvas，打开课程视频 →</button>
+        <div class="progress-line"><span id="progressFill"></span></div>
+        <div class="progress-label"><span id="currentStem">尚未开始</span><span id="progressRatio">0 / 0</span></div>
+        <ul id="failureList" class="failure-list"></ul>
+      </div>
+      <div class="tip-card"><span aria-hidden="true">✦</span><div><strong>登录顺序</strong><p>先在 Edge 的第一个标签打开并登录 Canvas，确认后工作台会在第二个标签打开课程视频。</p></div></div>
+    </aside>
+  </main>
+</body>
+</html>

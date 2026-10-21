@@ -35,7 +35,7 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 3. **MacOS 系统**：
    - 下载对应版本安装包 
-   - 或打开终端（terminal）运行 `bash script/install_mac.sh` 自动下载安装（自动识别 Intel / Apple Silicon 芯片）
+   - 或打开终端（terminal）运行 `bash scripts/install_mac.sh` 自动下载安装（自动识别 Intel / Apple Silicon 芯片）
    - 若遇到打不开的问题，可参考 [在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)
    - 若显示已损坏，尝试执行以下命令：
      ```shell
@@ -52,6 +52,8 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 ### 首次配置
 
 安装完成后，请前往设置页面填写您的 `Canvas Token` 以及文件下载保存目录。
+
+“字幕工作台”位于左侧边栏。原始字幕可以直接阅读、检索和复制；页面会将资料整理到设置中的下载目录：`字幕工作台/<课程>/01_原始JSON` 保存未改动的接口 JSON，`02_提取TXT` 保存提取的字幕，`03_Agent整理/01_字幕清理` 和 `03_Agent整理/02_知识点整理` 保存两种 Agent 结果。点击“打开 Agent 小窗口”可对当前课次或整门课逐节处理。字幕清理会按标点和长度切块，删除无意义口头语并保留原意；知识点整理可选择原始 TXT 或已清理的字幕，后者未生成时不可选。每块都独立调用与 Canvas Agent 相同配置的模型接口，代码负责逐课循环、拼接结果。两个模式的提示词可在窗口编辑，也可直接修改 `字幕工作台/prompts` 下的 Markdown 文件。抓取新课程时，先在设置页完成额外登录，再在工作台加载视频课程、选择课程并输入文件名前缀；系统会拉取该课程所有已上过的课次，抓取中断后使用同一前缀可继续。
 
 ![](./images/settings.png)
 
@@ -90,6 +92,7 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 + [x] 批改作业/修改作业 DDL
 + [x] 支持密院和本部 canvas 系统
 + [x] 视频下载/播放/字幕下载/截图抓取合成PDF
++ [x] 字幕工作台：浏览、搜索、导出原始字幕资料，并批量抓取视频空间课程字幕
 + [x] 签到守望：自动识别屏幕中的课堂签到二维码，支持扫码登录态与账号密码/OCR 回退登录
 + [x] 多 API Key 管理：支持添加多个 LLM 服务商 Key，自动识别提供商并拉取可用模型列表
 + [x] MCP Server：将 Canvas 数据能力通过标准 MCP 协议开放给 AI 客户端
@@ -287,13 +290,20 @@ SJTU-Canvas-Helper-fancy/
 │   ├── surveil.py                    # jAccount、验证码 OCR 和签到提交
 │   ├── requirements.txt              # Python 依赖
 │   └── README.md                     # Python 独立运行说明
-├── public/                           # Vite 静态资源
+├── python/json_transfer/             # 原字幕工具的 Python 代码和独立网页
+├── public/                           # Vite 直接复制的运行时资源
+│   ├── help.png                      # 设置页帮助图
+│   ├── favicon.png                   # 应用网页图标
+│   └── subtitle_archive/            # 内置原始 JSON、TXT 与清单
+├── images/                           # README 使用的截图和说明图片
 ├── website/                          # 项目介绍静态站点
-├── script/                           # 安装脚本和版本同步脚本
+├── scripts/                          # 安装、版本同步和本地 Release 构建脚本
 ├── .github/workflows/                # 检查、测试、网站和发布流水线
 ├── package.json                      # 前端脚本与依赖
 └── README.md
 ```
+
+`public/` 是 Vite 的静态资源目录，会原样进入前端构建和安装包；内置字幕页从这里读取迁移来的原始 JSON，原 Python 工具也使用其中的 TXT。`node_modules/`、`dist/`、`release/`、`src-tauri/target/` 和 `.venv*` 是依赖、构建产物或本机环境；源码集中在 `src/`、`src-tauri/` 和 `python/`。
 
 主要调用链如下：
 
@@ -897,13 +907,13 @@ src-tauri/target/release/bundle/appimage/*.AppImage
 - `src-tauri/tauri.conf.json`
 - `README.md` 下载链接
 - `website/` 页面
-- `script/install.bat`
-- `script/install_mac.sh`
+- `scripts/install.bat`
+- `scripts/install_mac.sh`
 
 使用同步脚本更新：
 
 ```shell
-python script/bump_version.py 3.1.0
+python scripts/bump_version.py 3.1.0
 
 # 安装了 GNU Make 时也可以使用
 make version 3.1.0
