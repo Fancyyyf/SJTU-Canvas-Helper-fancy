@@ -10,17 +10,17 @@ if exist "%LOCAL_MSI%" (
 )
 
 set "VERSION=3.0.16"
-set "URL=https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/download/app-v%VERSION%/SJTU.Canvas.Helper_%VERSION%_x64_en-US.msi"
-set "MSI=SJTU.Canvas.Helper_%VERSION%_x64_en-US.msi"
+set "URL=https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/download/app-v%VERSION%/SJTU.Canvas.Helper_%VERSION%_x64-setup.exe"
+set "INSTALLER=SJTU.Canvas.Helper_%VERSION%_x64-setup.exe"
 
 echo ============================================
 echo   SJTU Canvas Helper v%VERSION% Installer
 echo ============================================
 echo.
-echo Downloading %MSI% ...
+echo Downloading %INSTALLER% ...
 echo.
 
-powershell -Command "Invoke-WebRequest -Uri '%URL%' -OutFile '%MSI%'"
+powershell -Command "Invoke-WebRequest -Uri '%URL%' -OutFile '%INSTALLER%'"
 
 if %ERRORLEVEL% neq 0 (
     echo Download failed! Please check your network connection.
@@ -32,7 +32,7 @@ echo.
 echo Download complete. Installing...
 echo.
 
-msiexec /i "%MSI%" /qb
+start /wait "" "%INSTALLER%"
 if %ERRORLEVEL% neq 0 (
     echo Installation failed.
     pause
@@ -41,5 +41,5 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo Installation completed successfully!
-del "%MSI%"
+del "%INSTALLER%"
 pause

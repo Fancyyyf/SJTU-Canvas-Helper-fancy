@@ -47,6 +47,7 @@ jobs:
           NODE_OPTIONS: "--max_old_space_size=4096"
         with:
           includeUpdaterJson: false
+          assetNamePattern: "SJTU.Canvas.Helper_[version]_[arch][setup][ext]"
           tagName: app-v__VERSION__
           releaseName: "App v__VERSION__"
           releaseBody: "Download the Windows installer or portable archive from the assets below."

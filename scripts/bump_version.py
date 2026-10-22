@@ -128,6 +128,7 @@ def update_install_bat(version):
 
     old_version = match.group(1)
     content = content.replace(f'set "VERSION={old_version}"', f'set "VERSION={version}"')
+    content = re.sub(r'set "LOCAL_VERSION=\d+\.\d+\.\d+"', f'set "LOCAL_VERSION={version}"', content)
 
     with open(bat_path, 'w', encoding='utf-8') as f:
         f.write(content)
