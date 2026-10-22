@@ -18,6 +18,7 @@ import remarkGfm from "remark-gfm";
 import BasicLayout from "../components/layout";
 import SubtitleAgentDialog from "../components/subtitle_agent_dialog";
 import type { AgentMode, AgentProgress, KnowledgeSource } from "../components/subtitle_agent_dialog";
+import { agentProgressKey } from "../lib/subtitle_agent_progress";
 import { WorkspaceHero } from "../components/workspace_hero";
 import type { CanvasVideo, Course } from "../lib/model";
 
@@ -28,6 +29,7 @@ type SavedItem = { stem: string; courseFolder: string; courseId: number; hasAgen
 type ArchiveItem = ManifestItem & { source: ArchiveSource; course: string; lesson: number | null; part: number | null; hasAgent: boolean; hasCleaned: boolean; hasKnowledgeRaw: boolean; hasKnowledgeCleaned: boolean };
 type Segment = { bg: number; ed: number; courseId: number; res: string; zh?: string; en?: string };
 type SubtitlePayload = { data?: { afterAssemblyList?: Segment[] } };
+type ArchiveFetchStatus = "fetched" | "repaired" | "skipped";
 
 const archiveBase = `${import.meta.env.BASE_URL}subtitle_archive`;
 const stemPattern = /^(.*)_(\d+)_([12])$/;
@@ -118,7 +120,7 @@ export default function SubtitleArchivePage() {
   const [agentMode, setAgentMode] = useState<AgentMode>("clean");
   const [knowledgeSource, setKnowledgeSource] = useState<KnowledgeSource>("raw");
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
-  const [agentProgress, setAgentProgress] = useState<AgentProgress | null>(null);
+  const [agentProgress, setAgentProgress] = useState<Record<string, AgentProgress>>({});
   const [archiveLocation, setArchiveLocation] = useState("");
   const [importStatus, setImportStatus] = useState("");
   const [query, setQuery] = useState("");
@@ -143,7 +145,7 @@ export default function SubtitleArchivePage() {
     let disposed = false;
     let detach: (() => void) | undefined;
     void listen<AgentProgress>("subtitle_archive://agent_progress", (event) => {
-      if (!disposed) setAgentProgress(event.payload);
+      if (!disposed) setAgentProgress((current) => ({ ...current, [agentProgressKey(event.payload)]: event.payload }));
     }).then((unlisten) => {
       if (disposed) unlisten(); else detach = unlisten;
     }).catch(() => { /* Browser preview has no Tauri event bridge. */ });
@@ -267,7 +269,9 @@ export default function SubtitleArchivePage() {
       if (!videos.length) throw new Error("这门课程还没有已上过的视频课次");
       setCaptureProgress({ done: 0, total: videos.length });
       setCaptureStatus(`找到 ${videos.length} 节已上过的课，开始逐节抓取字幕。`);
-      let completed = 0;
+      let fetched = 0;
+      let repaired = 0;
+      let skipped = 0;
       const failed: string[] = [];
       for (const [index, video] of videos.entries()) {
         if (stopRef.current) break;
@@ -278,9 +282,11 @@ export default function SubtitleArchivePage() {
           failed.push(`${stem}：文件名已对应另一节课`);
         } else {
           try {
-            setCaptureStatus(`正在抓取 ${stem} · ${completed + 1}/${videos.length}`);
-            await invoke("fetch_archive_subtitle", { courseFolder, stem, canvasCourseId: courseId });
-            completed += 1;
+            setCaptureStatus(`正在检查 ${stem} · ${index + 1}/${videos.length}`);
+            const result = await invoke<ArchiveFetchStatus>("fetch_archive_subtitle", { courseFolder, stem, canvasCourseId: courseId });
+            if (result === "skipped") skipped += 1;
+            else if (result === "repaired") repaired += 1;
+            else fetched += 1;
           } catch (error) {
             failed.push(`${stem}：${String(error)}`);
           }
@@ -289,8 +295,8 @@ export default function SubtitleArchivePage() {
         setFailures([...failed]);
       }
       setCaptureStatus(stopRef.current
-        ? `已停止：处理 ${completed} 节，失败 ${failed.length} 节。再次开始可续抓。`
-        : `处理完成：${completed} 节，失败 ${failed.length} 节。`);
+        ? `已停止：新抓取 ${fetched} 节，补齐 TXT ${repaired} 节，跳过已有 ${skipped} 节，失败 ${failed.length} 节。再次开始可续抓。`
+        : `处理完成：新抓取 ${fetched} 节，补齐 TXT ${repaired} 节，跳过已有 ${skipped} 节，失败 ${failed.length} 节。`);
       await refresh();
       setSelectedCourse(courseFolder);
       setSelectedStem(`${prefix}_1_1`);
@@ -411,6 +417,7 @@ export default function SubtitleArchivePage() {
       courseItems={courseItems}
       progress={agentProgress}
       initialMode={agentMode}
+      onStart={() => setAgentProgress({})}
       onRefresh={refresh}
       onCompleted={async (mode, source, result) => {
         setAgentMode(mode);

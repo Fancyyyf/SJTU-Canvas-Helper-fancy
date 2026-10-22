@@ -7,7 +7,8 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $localConfig = Join-Path $repoRoot "src-tauri\tauri.local.conf.json"
 $sourceRelease = Join-Path $repoRoot "src-tauri\target\release"
-$outputRelease = Join-Path $repoRoot "release"
+$version = (Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json).version
+$outputRelease = Join-Path $repoRoot "release\$version"
 
 Push-Location $repoRoot
 try {
@@ -22,22 +23,31 @@ try {
   }
 
   New-Item -ItemType Directory -Path $outputRelease -Force | Out-Null
-  $version = (Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json).version
   foreach ($executable in $executables) {
     $versionedName = "{0}_{1}{2}" -f $executable.BaseName, $version, $executable.Extension
     Copy-Item -LiteralPath $executable.FullName -Destination (Join-Path $outputRelease $versionedName) -Force
-    try {
-      Copy-Item -LiteralPath $executable.FullName -Destination $outputRelease -Force
-    }
-    catch [System.IO.IOException] {
-      Write-Warning "The unversioned executable is in use; use $versionedName instead."
-    }
   }
 
   $bundleSource = Join-Path $sourceRelease "bundle"
   if (Test-Path -LiteralPath $bundleSource) {
-    Copy-Item -LiteralPath $bundleSource -Destination $outputRelease -Recurse -Force
+    Get-ChildItem -LiteralPath $bundleSource -Recurse -File |
+      Where-Object { $_.Name.Contains("_$version") } |
+      ForEach-Object {
+        $relativePath = $_.FullName.Substring($bundleSource.Length).TrimStart('\', '/')
+        $destination = Join-Path (Join-Path $outputRelease "bundle") $relativePath
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+      }
   }
+
+  $checksums = Get-ChildItem -LiteralPath $outputRelease -Recurse -File |
+    Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+    Sort-Object FullName |
+    ForEach-Object {
+      $relativePath = $_.FullName.Substring($outputRelease.Length + 1).Replace('\', '/')
+      "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relativePath
+    }
+  Set-Content -LiteralPath (Join-Path $outputRelease "SHA256SUMS.txt") -Value $checksums -Encoding ascii
 
   Write-Host "Release artifacts are available at: $outputRelease"
 }

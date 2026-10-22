@@ -296,6 +296,7 @@ SJTU-Canvas-Helper-fancy/
 │   ├── favicon.png                   # 应用网页图标
 │   └── subtitle_archive/            # 内置原始 JSON、TXT 与清单
 ├── images/                           # README 使用的截图和说明图片
+├── docs/maintenance/                 # 合并、功能核对与发布记录
 ├── website/                          # 项目介绍静态站点
 ├── scripts/                          # 安装、版本同步和本地 Release 构建脚本
 ├── .github/workflows/                # 检查、测试、网站和发布流水线
@@ -303,7 +304,7 @@ SJTU-Canvas-Helper-fancy/
 └── README.md
 ```
 
-`public/` 是 Vite 的静态资源目录，会原样进入前端构建和安装包；内置字幕页从这里读取迁移来的原始 JSON，原 Python 工具也使用其中的 TXT。`node_modules/`、`dist/`、`release/`、`src-tauri/target/` 和 `.venv*` 是依赖、构建产物或本机环境；源码集中在 `src/`、`src-tauri/` 和 `python/`。
+`public/` 是 Vite 的静态资源目录，会原样进入前端构建和安装包；内置字幕页从这里读取迁移来的原始 JSON，原 Python 工具也使用其中的 TXT。`docs/maintenance/` 保存维护记录。`node_modules/`、`dist/`、`release/<版本号>/`、`src-tauri/target/` 和 `.venv*` 是依赖、构建产物或本机环境；源码集中在 `src/`、`src-tauri/` 和 `python/`。
 
 主要调用链如下：
 
@@ -648,7 +649,7 @@ Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[�
 
 下面的流程只在当前 Windows 电脑生成本地 Release，不创建 GitHub Release、不切换 `release` 分支，也不向上游仓库上传文件。为了避免安装后的本地版本连接本项目预设的上游更新地址，构建命令还会通过临时配置关闭 Updater；该配置只对当前命令生效，不会修改 `src-tauri/tauri.conf.json`。
 
-在 Windows 上可直接运行 `yarn build:release:local`。脚本会使用本地构建配置生成 Release，并将可执行文件和安装包复制到仓库根目录的 `release/`，便于直接打开或分发；该目录不会提交到 Git。
+在 Windows 上可直接运行 `yarn build:release:local`。脚本会使用本地构建配置生成 Release，并将可执行文件、安装包和 SHA-256 清单复制到 `release/<版本号>/`；该目录不会提交到 Git。
 
 ##### 已经可以运行开发模式时
 
