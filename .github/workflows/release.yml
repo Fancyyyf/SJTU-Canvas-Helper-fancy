@@ -1,16 +1,19 @@
-name: Publish Windows release
+name: Build Windows release
 
 on:
   push:
     tags:
       - "app-v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish-windows:
+  build-windows:
     runs-on: windows-latest
+    env:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,7 +23,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:GITHUB_REF_NAME -ne "app-v$version") {
+          if ($env:GITHUB_EVENT_NAME -eq "push" -and $env:GITHUB_REF_NAME -ne "app-v$version") {
             throw "Tag $env:GITHUB_REF_NAME does not match package version $version"
           }
 
@@ -39,25 +42,56 @@ jobs:
 
       - run: yarn install --frozen-lockfile
 
-      # Fork releases use the local unsigned configuration. The application
-      # checks GitHub's asset digest before starting the Windows installer.
-      - uses: tauri-apps/tauri-action@v0
+      # Build without publishing: some forks reject Release writes from GITHUB_TOKEN.
+      - name: Build Windows packages
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_OPTIONS: "--max_old_space_size=4096"
-        with:
-          includeUpdaterJson: false
-          assetNamePattern: "SJTU.Canvas.Helper_[version]_[arch][setup][ext]"
-          tagName: app-v__VERSION__
-          releaseName: "App v__VERSION__"
-          releaseBody: "Download the Windows installer or portable archive from the assets below."
-          releaseDraft: false
-          prerelease: false
-          args: --config src-tauri/tauri.local.conf.json --target x86_64-pc-windows-msvc
+        run: yarn tauri build --config src-tauri/tauri.local.conf.json --target x86_64-pc-windows-msvc
 
-      - name: Test and publish portable archive
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Test portable archive
+        run: node --test .github/workflows/windows-portable/portable-archive.node-test.mjs
+
+      - name: Stage release assets and SHA-256 checksums
+        shell: pwsh
         run: |
-          node --test .github/workflows/windows-portable/portable-archive.node-test.mjs
-          node .github/workflows/windows-portable/portable.mjs x86_64-pc-windows-msvc
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $releaseDir = "src-tauri/target/x86_64-pc-windows-msvc/release"
+          $outputDir = "release-ci"
+          New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+          $binary = Join-Path $releaseDir "SJTU Canvas Helper.exe"
+          $msi = Get-ChildItem (Join-Path $releaseDir "bundle/msi") -Filter "*_${version}_x64_en-US.msi" -File | Select-Object -First 1
+          $nsis = Get-ChildItem (Join-Path $releaseDir "bundle/nsis") -Filter "*_${version}_x64-setup.exe" -File | Select-Object -First 1
+          if (!(Test-Path $binary) -or !$msi -or !$nsis) { throw "A Windows release package is missing" }
+          Copy-Item $binary (Join-Path $outputDir "SJTU.Canvas.Helper_${version}.exe")
+          Copy-Item $msi.FullName (Join-Path $outputDir "SJTU.Canvas.Helper_${version}_x64_en-US.msi")
+          Copy-Item $nsis.FullName (Join-Path $outputDir "SJTU.Canvas.Helper_${version}_x64-setup.exe")
+          node .github/workflows/windows-portable/build-ci.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Portable archive creation failed" }
+          $checksums = Get-ChildItem $outputDir -File | Sort-Object Name | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+          [System.IO.File]::WriteAllLines((Join-Path (Get-Location) "$outputDir/SHA256SUMS.txt"), $checksums)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-${{ github.sha }}
+          path: release-ci/*
+          if-no-files-found: error
+          retention-days: 30
+
+      # A fine-grained repository token with Contents: write enables automatic
+      # publication. Builds still succeed and remain downloadable without it.
+      - name: Publish GitHub Release
+        if: env.RELEASE_TOKEN != '' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "app-v$version"
+          $assets = @(Get-ChildItem release-ci -File | ForEach-Object { $_.FullName })
+          gh release view $tag --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --verify-tag --title "App v$version" --notes "Download the Windows installer or portable archive from the assets below."
+          }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }

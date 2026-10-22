@@ -256,7 +256,7 @@ Python 模块以用户提供的 `canvas_video_check_in_fancy` 本地版本为基
 | 前端 | React 18、TypeScript、Vite 5、MUI 7 | `package.json`、`vite.config.ts` |
 | 前端测试 | Vitest、Testing Library、jsdom | `vitest.config.ts` |
 | 签到模块 | Python、Pillow、pyzbar、ddddocr | `python/attendance/requirements.txt` |
-| 自动发布 | GitHub Actions、`tauri-apps/tauri-action` | `.github/workflows/release.yml` |
+| Windows 发布构建 | GitHub Actions、Tauri CLI | `.github/workflows/release.yml` |
 
 依赖版本应以锁文件为准。仓库包含 `yarn.lock`，因此开发和 CI 都优先使用 Yarn，不要同时提交其他包管理器生成的锁文件。
 
@@ -328,7 +328,7 @@ Python JSON Lines stdout → Rust 解析 → attendance://event → 页面
 通用工具：
 
 - Git。
-- Node.js 20 或 22。发布工作流使用 Node 20，前端检查工作流使用 Node 22。
+- Node.js 20 或 22。发布和前端检查工作流使用 Node 22。
 - Yarn。若系统没有 `yarn`，可先执行 `corepack enable`；也可安装 Yarn Classic。
 - Rust stable 与 Cargo。Windows 必须使用 MSVC toolchain。
 - Python 3，仅“签到守望”开发和运行需要。
@@ -848,7 +848,7 @@ src-tauri/target/<target>/release/bundle/nsis/*-setup.exe
 
 未签名安装包可以本地运行，但从浏览器下载时通常会触发 SmartScreen。面向公众发布时应配置 Windows 代码签名，参见[Tauri Windows 签名指南](https://v2.tauri.app/distribute/sign/windows/)。
 
-发布工作流使用 `portable.mjs` 将 Windows 可执行文件和便携标记打包成 ZIP，并作为 Release 资产上传。
+发布工作流使用 `portable-archive.mjs` 将 Windows 可执行文件和便携标记打包成 ZIP，并上传为 Actions 构建产物。配置 `RELEASE_TOKEN` 后也会上传到 GitHub Release。
 
 ### 10. macOS 打包
 
@@ -939,7 +939,7 @@ make version 3.1.0
 
 ### 14. GitHub Actions 自动分发
 
-`.github/workflows/release.yml` 在推送 `app-v<version>` 标签时运行。它先检查标签与 `package.json` 版本一致，再构建 Windows x64 安装包及便携 ZIP，并使用 GitHub 自动提供的 `GITHUB_TOKEN` 上传至同名 Release。无需 Tauri Updater 私钥。当前安装包没有 Windows 发行商代码签名，下载时可能触发 SmartScreen。
+`.github/workflows/release.yml` 在推送 `app-v<version>` 标签时运行，也支持手动触发。它先检查标签与 `package.json` 版本一致，再构建 Windows x64 安装包、便携 ZIP 和 SHA-256 清单，始终上传到 Actions 构建产物。此 fork 的 `GITHUB_TOKEN` 创建 Release 时返回 403；如需自动发布 GitHub Release，请在仓库 Actions secrets 中配置仅授予此仓库 `Contents: write` 的细粒度 `RELEASE_TOKEN`。未配置时构建仍会成功，Release 可手动上传。无需 Tauri Updater 私钥。当前安装包没有 Windows 发行商代码签名，下载时可能触发 SmartScreen。
 
 推荐发布流程：
 
@@ -947,8 +947,8 @@ make version 3.1.0
 2. 运行版本同步脚本并提交版本变更。
 3. 在本地或临时 CI 完成全部检查。
 4. 将已审核的提交推送到 `main`，然后推送同一提交的 `app-v<version>` 标签。
-5. 等待 Windows 发布任务完成，下载安装包和便携 ZIP 做安装冒烟测试。
-6. 确认 GitHub Release 的资产完整且不是草稿或预发布版本，应用即可通过 `/releases/latest` 检测到它。
+5. 等待 Windows 发布任务完成，从 Actions 构建产物下载安装包和便携 ZIP 做安装冒烟测试。
+6. 已配置 `RELEASE_TOKEN` 时检查自动发布的 Release；未配置时手动创建同名 Release 并上传构建产物。确认资产完整且不是草稿或预发布版本，应用即可通过 `/releases/latest` 检测到它。
 
 Tauri 官方的 GitHub Release 流水线示例见[GitHub Actions 分发指南](https://v2.tauri.app/distribute/pipelines/github/)。
 
