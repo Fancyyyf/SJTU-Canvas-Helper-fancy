@@ -43,6 +43,7 @@ mod error;
 mod mcp;
 mod model;
 mod subtitle_archive;
+mod release_update;
 mod utils;
 
 #[macro_use]
@@ -1296,6 +1297,8 @@ async fn main() -> Result<()> {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            release_update::check_release_update,
+            release_update::install_release_update,
             read_log_content,
             frontend_log,
             console_log,

@@ -12,10 +12,10 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowDropDownRoundedIcon from "@mui/icons-material/ArrowDropDownRounded";
-import { check } from "@tauri-apps/plugin-updater";
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { useAppMessage } from "./message";
 import { checkForUpdates } from "./utils";
+import { checkReleaseUpdate } from "./release_update";
 
 const NEVER_REMIND_KEY = "sjtu-canvas-helper:update-notice:never-remind";
 const SKIPPED_VERSION_KEY = "sjtu-canvas-helper:update-notice:skipped-version";
@@ -101,19 +101,13 @@ export function UpdateNoticeProvider({ children }: { children: ReactNode }) {
 
     const checkOnStartup = async () => {
       try {
-        const update = await check(
-          allowDowngradePreview ? { allowDowngrades: true } : undefined
-        );
-        if (cancelled) {
-          await update?.close();
-          return;
-        }
+        const update = await checkReleaseUpdate();
+        if (cancelled) return;
 
         setAvailableVersion(update?.version ?? null);
         setShowUpdatePrompt(update !== null);
-        await update?.close();
       } catch (error) {
-        console.debug("Automatic update check failed", error);
+        if (!cancelled) messageApi.warning(`自动检查更新失败：${String(error)}`);
       }
     };
 
@@ -121,7 +115,7 @@ export function UpdateNoticeProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [allowDowngradePreview, previewVersion]);
+  }, [allowDowngradePreview, messageApi, previewVersion]);
 
   const contextValue = useMemo(
     () => ({
@@ -153,7 +147,7 @@ export function UpdateNoticeProvider({ children }: { children: ReactNode }) {
             </Alert>
           ) : (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              安装完成后应用会自动重启。
+              将从 GitHub Release 下载并校验安装包，然后启动安装程序。
             </Typography>
           )}
         </DialogContent>

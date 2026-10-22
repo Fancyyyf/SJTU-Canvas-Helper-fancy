@@ -17,21 +17,17 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 ## 安装指南
 
-| 操作系统类型 | 推荐下载（点击直接下载最新版） | 说明 |
+| 操作系统类型 | 推荐下载 | 说明 |
 | :--- | :--- | :--- |
-| 🪟 **Windows 64 位** | [SJTU.Canvas.Helper_3.0.13_x64_en-US.msi](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_3.0.13_x64_en-US.msi) | 首选，支持自动更新 |
-| 🪟 **Windows 32 位** | [SJTU.Canvas.Helper_3.0.13_x86_en-US.msi](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_3.0.13_x86_en-US.msi) | 仅限老旧 32 位电脑 |
-| 🍎 **macOS Apple Silicon** | [SJTU.Canvas.Helper_3.0.13_aarch64.dmg](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_3.0.13_aarch64.dmg) | M 系列芯片 |
-| 🍎 **macOS Intel** | [SJTU.Canvas.Helper_x64.app.tar.gz](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_x64.app.tar.gz) | Intel 芯片 |
-| 🐧 **Linux Debian/Ubuntu** | [SJTU.Canvas.Helper_3.0.13_amd64.deb](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_3.0.13_amd64.deb) | `dpkg` 安装 |
-| 🐧 **Linux RedHat/Fedora** | [SJTU.Canvas.Helper-3.0.13-1.x86_64.rpm](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper-3.0.13-1.x86_64.rpm) | `rpm` 安装 |
-| 🐧 **Linux 通用** | [SJTU.Canvas.Helper_3.0.13_amd64.AppImage](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases/download/app-v3.0.13/SJTU.Canvas.Helper_3.0.13_amd64.AppImage) | 赋予权限后直接运行 |
+| 🪟 **Windows 64 位** | [v3.0.16 安装包](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.16) | 选择 `_x64-setup.exe`，支持应用内检查、下载和启动升级安装程序 |
+| 🪟 **Windows 64 位便携版** | [v3.0.16 便携 ZIP](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.16) | 便携版升级需手动替换文件 |
+| **其他系统** | [本 fork 的 Release](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases) | 当前没有自动构建的安装包；可按下文说明自行构建 |
 
-1. 前往 [Release](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases) 页面下载并安装一次即可，后续主版本更新将自动拉取，无需重复下载
+1. 前往 [本 fork 的 Release](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases) 页面下载并安装。应用会检查新版本，用户确认后下载安装包并启动安装程序。
 
 2. **Windows 系统**：
-   - 推荐下载 `.msi` 安装包，支持自动更新功能
-   - 也可选择免安装便携版：`SJTU.Canvas.Helper_3.0.13_x64_portable.zip`
+   - 推荐下载 `_x64-setup.exe` 安装包，支持应用内启动升级安装程序
+   - 也可选择免安装便携版：`SJTU.Canvas.Helper_3.0.16_x64_portable.zip`
 
 3. **MacOS 系统**：
    - 下载对应版本安装包 
@@ -647,7 +643,7 @@ Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[�
 
 #### Windows x64 Release 快速操作
 
-下面的流程只在当前 Windows 电脑生成本地 Release，不创建 GitHub Release、不切换 `release` 分支，也不向上游仓库上传文件。为了避免安装后的本地版本连接本项目预设的上游更新地址，构建命令还会通过临时配置关闭 Updater；该配置只对当前命令生效，不会修改 `src-tauri/tauri.conf.json`。
+下面的流程只在当前 Windows 电脑生成本地 Release，不创建 GitHub Release，也不上传文件。构建使用本地配置关闭 Tauri 原生 Updater；应用内检查更新则读取本 fork 的 GitHub Releases。
 
 在 Windows 上可直接运行 `yarn build:release:local`。脚本会使用本地构建配置生成 Release，并将可执行文件、安装包和 SHA-256 清单复制到 `release/<版本号>/`；该目录不会提交到 Git。
 
@@ -790,7 +786,7 @@ yarn tauri build `
 
 Updater 签名不等同于 Windows Authenticode 签名。面向公众分发时仍应配置 Windows 代码签名，否则安装包可能触发 SmartScreen。
 
-如果要通过仓库的 GitHub Actions 一次构建全部平台，应先运行版本同步脚本、检查签名 Secrets 和更新地址，再将已经审核的提交推送到 `release` 分支。推送会立即创建公开 Release，详细步骤见第 14 节。
+此 fork 的 GitHub Actions 在推送 `app-v<version>` 标签后构建 Windows x64 安装包和便携版，详见第 14 节。
 
 #### 通用构建流程
 
@@ -798,7 +794,7 @@ Updater 签名不等同于 Windows Authenticode 签名。面向公众分发时�
 yarn tauri build --config src-tauri/tauri.local.conf.json
 ```
 
-正式发布时先配置第 13 节的 Updater 私钥和各操作系统签名，然后使用默认配置运行 `yarn tauri build`，不要加载本地配置覆盖文件。
+此 fork 的 Windows 发布包使用未启用 Tauri 签名更新器的本地配置；应用内更新通过 GitHub Release API 获取版本、下载并校验安装包。
 
 构建过程依次完成：
 
@@ -852,7 +848,7 @@ src-tauri/target/<target>/release/bundle/nsis/*-setup.exe
 
 未签名安装包可以本地运行，但从浏览器下载时通常会触发 SmartScreen。面向公众发布时应配置 Windows 代码签名，参见[Tauri Windows 签名指南](https://v2.tauri.app/distribute/sign/windows/)。
 
-仓库还包含 Windows 便携版 composite action。当前其中的 `disable-updater.mjs` 和 `portable.mjs` 仍访问旧版 Tauri 配置路径 `config.tauri`/`config.package`，在 Tauri 2 配置上使用前应先改为顶层 `plugins`、`bundle`、`version` 和 `productName`；未修复前不要把便携 ZIP 作为发布成功的必要条件。
+发布工作流使用 `portable.mjs` 将 Windows 可执行文件和便携标记打包成 ZIP，并作为 Release 资产上传。
 
 ### 10. macOS 打包
 
@@ -897,7 +893,7 @@ src-tauri/target/release/bundle/appimage/*.AppImage
 
 `.deb`、`.rpm` 和 AppImage 的运行环境并不完全相同，应至少在对应发行版的干净虚拟机中验证启动、WebKitGTK、文件选择、视频代理和更新流程。AppImage 可选用 GPG 签名，但用户仍需主动验证签名；参见[Tauri Linux 签名说明](https://v2.tauri.app/distribute/sign/linux/)。
 
-`.github/workflows/release.yml` 当前对 Ubuntu 的部分 WebKitGTK 包固定了具体版本。GitHub Runner 镜像升级后这些版本可能消失；若 APT 无法解析，应改为 Runner 当前仓库提供的兼容版本，并重新做 AppImage、DEB 和 RPM 验证。
+当前自动发布工作流仅构建 Windows x64。macOS 和 Linux 安装包需在相应平台单独构建、验证并上传。
 
 ### 12. 版本号与发布前检查
 
@@ -930,68 +926,29 @@ make version 3.1.0
 - Python 文件已进入安装包资源目录，且至少验证依赖检测和 QR/OCR 初始化。
 - 使用干净系统测试安装、卸载、升级和配置保留。
 - 核对安装包架构、版本号、文件名、签名和 SHA-256。
-- 确认安装包、更新包和 `latest.json` 中的 URL、平台键与签名匹配。
+- 确认 GitHub Release 的版本、安装包名称和 SHA-256 摘要匹配。
 - 不将 Token、Cookie、密码、私钥、证书或 `.env` 上传为构建产物。
 
-### 13. 自动更新签名
+### 13. 应用内更新
 
-本项目启用了 Tauri Updater，并设置 `createUpdaterArtifacts: "v1Compatible"`。更新包必须使用 updater 私钥签名；这与 Windows Authenticode 或 Apple Developer ID 的操作系统代码签名是两套独立机制。
+应用启动时和点击侧边栏“检查更新”时，向 `Fancyyyf/SJTU-Canvas-Helper-fancy` 的 GitHub Release API 查询最新正式版本。Windows x64 版本可在应用内下载对应的 NSIS 安装包；下载完成后必须通过 GitHub Release 资产的 SHA-256 摘要校验，才会启动安装程序。用户需按照安装程序提示完成升级。如果 GitHub 无法访问、版本信息异常、安装包缺失、下载不完整或校验失败，应用会显示具体错误，保留当前版本。
 
-首次为自己的 fork 建立更新通道时：
+便携版不能由安装程序原地覆盖；如需继续使用便携版，请从 Release 下载新的便携 ZIP 并手动替换。macOS 和 Linux 暂无应用内安装程序，检查更新后需到 Release 页面手动下载。
 
-```shell
-yarn tauri signer generate -w /安全位置/sjtu-canvas-helper.key
-```
-
-将生成的公钥填入 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`，私钥绝不能提交到仓库。本地构建可通过以下环境变量提供私钥：
-
-```powershell
-# PowerShell
-$env:TAURI_SIGNING_PRIVATE_KEY = "私钥文件路径或内容"
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "私钥密码"
-yarn tauri build
-```
-
-```bash
-# macOS/Linux
-export TAURI_SIGNING_PRIVATE_KEY="私钥文件路径或内容"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="私钥密码"
-yarn tauri build
-```
-
-官方说明见[Tauri Updater 签名文档](https://v2.tauri.app/plugin/updater/)。丢失私钥后，已安装客户端将无法验证使用原公钥的新更新，因此必须离线备份。
-
-为 fork 建立独立发布渠道时，必须同时替换当前配置中的 `plugins.updater.pubkey` 和 `plugins.updater.endpoints`。公钥、签名私钥、下载域名和 `latest.json` 必须属于同一发布渠道；不要让 fork 的客户端继续从上游仓库下载安装包。
+此 fork 没有用于 Tauri 原生 Updater 的私钥，因此 `tauri.conf.json` 已关闭该更新通道和签名产物生成。若以后启用原生 Updater，需重新生成并安全保存私钥，设置与本仓库 Release 匹配的公钥、更新地址和签名产物；见[Tauri Updater 文档](https://v2.tauri.app/plugin/updater/)。
 
 ### 14. GitHub Actions 自动分发
 
-`.github/workflows/release.yml` 在代码推送到 `release` 分支时自动运行。矩阵当前覆盖：
-
-- macOS Apple Silicon：`aarch64-apple-darwin`
-- macOS Intel：`x86_64-apple-darwin`
-- Linux x86_64
-- Windows x64：`x86_64-pc-windows-msvc`
-- Windows x86：`i686-pc-windows-msvc`
-
-工作流通过 `tauri-action` 创建 `app-v<version>` GitHub Release、上传安装包并生成 `latest.json`。它使用以下 Secrets：
-
-| Secret | 用途 |
-| --- | --- |
-| `TAURI_PRIVATE_KEY` | Tauri Updater 私钥 |
-| `TAURI_KEY_PASSWORD` | Updater 私钥密码 |
-| `GITHUB_TOKEN` | 创建 Release 和上传产物，GitHub 自动提供 |
-
-当前工作流没有完整配置 Windows 发行商代码签名和 macOS Developer ID 公证。面向普通用户发布前，应在矩阵任务中补齐各平台证书和公证步骤；Updater 签名不能消除 SmartScreen 或 Gatekeeper 警告。
+`.github/workflows/release.yml` 在推送 `app-v<version>` 标签时运行。它先检查标签与 `package.json` 版本一致，再构建 Windows x64 安装包及便携 ZIP，并使用 GitHub 自动提供的 `GITHUB_TOKEN` 上传至同名 Release。无需 Tauri Updater 私钥。当前安装包没有 Windows 发行商代码签名，下载时可能触发 SmartScreen。
 
 推荐发布流程：
 
 1. 在功能分支完成开发并合并到 `main`。
 2. 运行版本同步脚本并提交版本变更。
 3. 在本地或临时 CI 完成全部检查。
-4. 将已审核的提交合并到 `release`。
-5. 推送 `release` 会立即创建公开 Release，操作前务必再次确认版本和 Secrets。
-6. 等待所有平台矩阵完成，逐项下载并进行安装冒烟测试。
-7. 确认固定更新地址所需的 `latest` Release/tag 存在，并成功收到新的 `latest.json`。
+4. 将已审核的提交推送到 `main`，然后推送同一提交的 `app-v<version>` 标签。
+5. 等待 Windows 发布任务完成，下载安装包和便携 ZIP 做安装冒烟测试。
+6. 确认 GitHub Release 的资产完整且不是草稿或预发布版本，应用即可通过 `/releases/latest` 检测到它。
 
 Tauri 官方的 GitHub Release 流水线示例见[GitHub Actions 分发指南](https://v2.tauri.app/distribute/pipelines/github/)。
 
@@ -1008,8 +965,8 @@ Tauri 官方的 GitHub Release 流水线示例见[GitHub Actions 分发指南](h
 | Python 依赖检测失败 | 确认页面使用的解释器与执行 pip 的解释器完全相同 |
 | `pyzbar` 提示找不到 zbar | macOS 安装 `zbar`；Linux 安装发行版的 zbar 运行库 |
 | macOS 打包后找不到 Python | 在签到页面配置绝对解释器路径；GUI 不保证继承 shell `PATH` |
-| 更新器拒绝安装包 | 检查公钥、私钥、`.sig`、`latest.json` 平台键和下载 URL |
-| CI Ubuntu 安装依赖失败 | 检查 Runner 版本与固定的 WebKitGTK 包版本是否仍匹配 |
+| 应用内更新失败 | 检查 GitHub 网络访问、Release 是否为正式版、对应安装包和 SHA-256 摘要 |
+| CI 发布失败 | 检查标签与应用版本是否一致，以及 Release 资产上传权限 |
 
 关于贡献流程、提交规范和 Pull Request 要求，另见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

@@ -8,8 +8,6 @@ import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
 import PictureAsPdfRoundedIcon from "@mui/icons-material/PictureAsPdfRounded";
 import SlideshowRoundedIcon from "@mui/icons-material/SlideshowRounded";
 import TableChartRoundedIcon from "@mui/icons-material/TableChartRounded";
-import { relaunch } from '@tauri-apps/plugin-process';
-import { check } from "@tauri-apps/plugin-updater";
 import dayjs, { Dayjs } from "dayjs";
 import { decode } from "js-base64";
 import { getConfig } from "./config";
@@ -24,6 +22,7 @@ import {
   Option
 } from "./model";
 import { AppMessageApi } from "./message";
+import { checkReleaseUpdate, installReleaseUpdate } from "./release_update";
 import { logDiagnostic, logHandledError, logLegacy } from "./logger";
 
 export function isMergableFileType(fileType: string): boolean {
@@ -303,7 +302,6 @@ export async function checkForUpdates(
   onAvailabilityChange?: (version: string | null) => void
 ) {
   const messageKey = "checking";
-  let update: Awaited<ReturnType<typeof check>> | null = null;
 
   try {
     messageApi.open({
@@ -311,7 +309,7 @@ export async function checkForUpdates(
       type: "loading",
       content: "检查中🚀...",
     });
-    update = await check();
+    const update = await checkReleaseUpdate();
     messageApi.destroy(messageKey);
     if (!update) {
       onAvailabilityChange?.(null);
@@ -320,27 +318,17 @@ export async function checkForUpdates(
     }
 
     onAvailabilityChange?.(update.version);
-    messageApi.info(`发现新版本 v${update.version}，正在下载并安装…`);
-
-    let downloaded = 0;
-    let contentLength: undefined | number = 0;
-    // alternatively we could also call update.download() and update.install() separately
-    await update.downloadAndInstall((event) => {
-      switch (event.event) {
-        case 'Started':
-          contentLength = event.data.contentLength;
-          console.log(`started downloading ${event.data.contentLength} bytes`);
-          break;
-        case 'Progress':
-          downloaded += event.data.chunkLength;
-          console.log(`downloaded ${downloaded} from ${contentLength}`);
-          break;
-        case 'Finished':
-          console.log('download finished');
-          break;
-        }
-      });
-    await relaunch();
+    if (!update.installerAvailable) {
+      messageApi.warning(`发现 v${update.version}，但没有适用于当前系统的自动安装包。请前往 ${update.releaseUrl} 手动下载。`);
+      return;
+    }
+    messageApi.open({ key: messageKey, type: "loading", content: `正在下载 v${update.version} 安装包…`, duration: 0 });
+    await installReleaseUpdate(update.version, ({ downloaded, total }) => {
+      const percent = Math.min(100, Math.floor((downloaded / total) * 100));
+      messageApi.open({ key: messageKey, type: "loading", content: `正在下载 v${update.version} 安装包：${percent}%`, duration: 0 });
+    });
+    messageApi.destroy(messageKey);
+    messageApi.success("安装程序已启动。请按提示完成安装；如提示文件正在使用，请先退出当前应用。", 10);
   } catch (error) {
     logHandledError({
       code: "UPDATER.CHECK_OR_INSTALL_FAILED",
@@ -351,13 +339,9 @@ export async function checkForUpdates(
       recoverable: true,
       fallback: { used: true, strategy: "keep_current_version", result: "success" },
     });
-    messageApi.error("🥹出现错误：" + error);
+    messageApi.error(`更新失败：${String(error)}`, 10);
   } finally {
-    try {
-      await update?.close();
-    } catch (error) {
-      console.debug("Failed to close updater resource", error);
-    }
+    messageApi.destroy(messageKey);
   }
 }
 
