@@ -7,13 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
-    env:
-      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +40,7 @@ jobs:
 
       - run: yarn install --frozen-lockfile
 
-      # Build without publishing: some forks reject Release writes from GITHUB_TOKEN.
+      # Build separately so release API failures never discard the packages.
       - name: Build Windows packages
         env:
           NODE_OPTIONS: "--max_old_space_size=4096"
@@ -77,21 +75,29 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # A fine-grained repository token with Contents: write enables automatic
-      # publication. Builds still succeed and remain downloadable without it.
+      # The built-in token normally publishes releases. A repository-scoped PAT
+      # is a fallback when GitHub requires workflow write access for the target.
       - name: Publish GitHub Release
-        if: env.RELEASE_TOKEN != '' && github.event_name == 'push'
+        if: github.event_name == 'push'
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $tag = "app-v$version"
           $assets = @(Get-ChildItem release-ci -File | ForEach-Object { $_.FullName })
-          gh release view $tag --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @assets --clobber
-          } else {
-            gh release create $tag @assets --verify-tag --title "App v$version" --notes "Download the Windows installer or portable archive from the assets below."
+          $published = $false
+          foreach ($token in @($env:GITHUB_TOKEN, $env:RELEASE_TOKEN)) {
+            if (!$token) { continue }
+            $env:GH_TOKEN = $token
+            gh release view $tag --json tagName *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag @assets --clobber
+            } else {
+              gh release create $tag @assets --verify-tag --title "App v$version" --notes "Download the Windows installer or portable archive from the assets below."
+            }
+            if ($LASTEXITCODE -eq 0) { $published = $true; break }
+            Write-Warning "Release publication failed with the current token"
           }
-          if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }
+          if (!$published) { throw "GitHub Release publication failed" }

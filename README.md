@@ -848,7 +848,7 @@ src-tauri/target/<target>/release/bundle/nsis/*-setup.exe
 
 未签名安装包可以本地运行，但从浏览器下载时通常会触发 SmartScreen。面向公众发布时应配置 Windows 代码签名，参见[Tauri Windows 签名指南](https://v2.tauri.app/distribute/sign/windows/)。
 
-发布工作流使用 `portable-archive.mjs` 将 Windows 可执行文件和便携标记打包成 ZIP，并上传为 Actions 构建产物。配置 `RELEASE_TOKEN` 后也会上传到 GitHub Release。
+发布工作流使用 `portable-archive.mjs` 将 Windows 可执行文件和便携标记打包成 ZIP，上传为 Actions 构建产物，并在标签触发时发布到 GitHub Release。
 
 ### 10. macOS 打包
 
@@ -939,7 +939,7 @@ make version 3.1.0
 
 ### 14. GitHub Actions 自动分发
 
-`.github/workflows/release.yml` 在推送 `app-v<version>` 标签时运行，也支持手动触发。它先检查标签与 `package.json` 版本一致，再构建 Windows x64 安装包、便携 ZIP 和 SHA-256 清单，始终上传到 Actions 构建产物。此 fork 的 `GITHUB_TOKEN` 创建 Release 时返回 403；如需自动发布 GitHub Release，请在仓库 Actions secrets 中配置仅授予此仓库 `Contents: write` 的细粒度 `RELEASE_TOKEN`。未配置时构建仍会成功，Release 可手动上传。无需 Tauri Updater 私钥。当前安装包没有 Windows 发行商代码签名，下载时可能触发 SmartScreen。
+`.github/workflows/release.yml` 在推送 `app-v<version>` 标签时运行，也支持手动触发。它先检查标签与 `package.json` 版本一致，再构建 Windows x64 安装包、便携 ZIP 和 SHA-256 清单，始终上传到 Actions 构建产物。标签触发时先用工作流内置的 `GITHUB_TOKEN` 发布 Release；如果 GitHub 因目标提交涉及工作流文件变更而拒绝创建，才使用可选的仓库 Secret `RELEASE_TOKEN` 重试。手动触发仅构建，不发布。无需 Tauri Updater 私钥。当前安装包没有 Windows 发行商代码签名，下载时可能触发 SmartScreen。
 
 推荐发布流程：
 
@@ -948,7 +948,7 @@ make version 3.1.0
 3. 在本地或临时 CI 完成全部检查。
 4. 将已审核的提交推送到 `main`，然后推送同一提交的 `app-v<version>` 标签。
 5. 等待 Windows 发布任务完成，从 Actions 构建产物下载安装包和便携 ZIP 做安装冒烟测试。
-6. 已配置 `RELEASE_TOKEN` 时检查自动发布的 Release；未配置时手动创建同名 Release 并上传构建产物。确认资产完整且不是草稿或预发布版本，应用即可通过 `/releases/latest` 检测到它。
+6. 检查自动发布的 Release；如 GitHub 拒绝两个令牌，仍可从 Actions 构建产物手动上传。确认资产完整且不是草稿或预发布版本，应用即可通过 `/releases/latest` 检测到它。
 
 Tauri 官方的 GitHub Release 流水线示例见[GitHub Actions 分发指南](https://v2.tauri.app/distribute/pipelines/github/)。
 
