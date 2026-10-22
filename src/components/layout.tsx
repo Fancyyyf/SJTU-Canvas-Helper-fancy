@@ -240,9 +240,10 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
     if (!sidebarDragRef.current) {
       if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8) {
         window.clearTimeout(pressTimerRef.current);
-        pressRef.current = null;
+        sidebarDragRef.current = { key: press.key, x: event.clientX, y: event.clientY };
+      } else {
+        return;
       }
-      return;
     }
     const underPointer = document.elementFromPoint(event.clientX, event.clientY);
     const remove = Boolean(underPointer?.closest("[data-sidebar-remove]"));
@@ -384,6 +385,12 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
                 data-sidebar-key={item.key}
                 component={Link}
                 to={item.path}
+                draggable={false}
+                onDragStart={(event) => event.preventDefault()}
+                onPointerDown={(event) => startSidebarPress(item.key, event)}
+                onPointerMove={moveSidebarPress}
+                onPointerUp={finishSidebarPress}
+                onPointerCancel={cancelSidebarPress}
                 onClickCapture={(event) => {
                   if (suppressNavigationRef.current) {
                     event.preventDefault();
@@ -423,10 +430,6 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
                 }}
               >
                 <ListItemIcon
-                  onPointerDown={(event) => startSidebarPress(item.key, event)}
-                  onPointerMove={moveSidebarPress}
-                  onPointerUp={finishSidebarPress}
-                  onPointerCancel={cancelSidebarPress}
                   sx={{
                     minWidth: collapsed && isDesktop ? 0 : 38,
                     color: "inherit",
@@ -642,7 +645,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
         <DialogTitle>自定义侧边栏快捷入口</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            首页始终保留。长按侧边栏图标可拖动排序，拖到移除区域可隐藏；未固定的功能仍可从首页进入。
+            首页始终保留。拖动侧边栏入口可排序，也可长按后拖动；拖到移除区域可隐藏。未固定的功能仍可从首页进入。
           </Typography>
           <Box
             sx={{

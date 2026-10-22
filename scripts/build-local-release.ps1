@@ -26,6 +26,12 @@ try {
   foreach ($executable in $executables) {
     $versionedName = "{0}_{1}{2}" -f $executable.BaseName, $version, $executable.Extension
     Copy-Item -LiteralPath $executable.FullName -Destination (Join-Path $outputRelease $versionedName) -Force
+    try {
+      Copy-Item -LiteralPath $executable.FullName -Destination (Join-Path (Join-Path $repoRoot "release") $executable.Name) -Force
+    }
+    catch [System.IO.IOException] {
+      Write-Warning "The latest executable is in use; run release\$version\$versionedName instead."
+    }
   }
 
   $bundleSource = Join-Path $sourceRelease "bundle"

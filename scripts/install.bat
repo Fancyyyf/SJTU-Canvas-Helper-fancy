@@ -1,7 +1,7 @@
 @echo off
 setlocal
-set "LOCAL_VERSION=3.0.14"
-set "LOCAL_MSI=%~dp0..\release\bundle\msi\SJTU Canvas Helper_%LOCAL_VERSION%_x64_en-US.msi"
+set "LOCAL_VERSION=3.0.15"
+set "LOCAL_MSI=%~dp0..\release\%LOCAL_VERSION%\bundle\msi\SJTU Canvas Helper_%LOCAL_VERSION%_x64_en-US.msi"
 if exist "%LOCAL_MSI%" (
     echo Installing local SJTU Canvas Helper v%LOCAL_VERSION% ...
     msiexec /i "%LOCAL_MSI%" /qb

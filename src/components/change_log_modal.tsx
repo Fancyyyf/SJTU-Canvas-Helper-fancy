@@ -15,6 +15,13 @@ import {
 import { alpha, useTheme } from "@mui/material/styles";
 
 const changeLogs = [{
+  version: "v3.0.15",
+  date: "2026/10/22",
+  items: [
+    "修复侧边栏排序：可直接拖动整行入口或长按图标后拖动，普通点击仍会打开页面。",
+    "修复本地 Windows 安装脚本查找安装包的路径。",
+  ],
+}, {
   version: "v3.0.14",
   date: "2026/10/21",
   items: [

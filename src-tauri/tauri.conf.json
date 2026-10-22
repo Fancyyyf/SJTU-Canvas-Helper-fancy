@@ -25,7 +25,7 @@
   },
   "productName": "SJTU Canvas Helper",
   "mainBinaryName": "SJTU Canvas Helper",
-  "version": "3.0.14",
+  "version": "3.0.15",
   "identifier": "com.okabe.sjtu.canvas",
   "plugins": {
     "updater": {

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import BasicLayout from "../layout";
 
 const mocks = vi.hoisted(() => ({ dispatch: vi.fn() }));
@@ -28,17 +28,18 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); mocks.dispatch.mockClear(); });
 
-it("reorders a shortcut after a long press on its icon", async () => {
+it("reorders a shortcut when its row is dragged immediately", async () => {
   render(<MemoryRouter><BasicLayout>内容</BasicLayout></MemoryRouter>);
   const source = screen.getByRole("link", { name: "视频管理" });
   const target = screen.getByRole("link", { name: "系统设置" });
-  const icon = source.querySelector(".MuiListItemIcon-root") as HTMLElement;
-  icon.setPointerCapture = vi.fn();
-  fireEvent.pointerDown(icon, { pointerId: 1, button: 0, clientX: 20, clientY: 50 });
-  await waitFor(() => expect(screen.getByText("拖到这里移除快捷入口")).toBeInTheDocument());
+  source.setPointerCapture = vi.fn();
+  expect(source).toHaveAttribute("draggable", "false");
+  expect(fireEvent.dragStart(source)).toBe(false);
   Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn(() => target) });
-  fireEvent.pointerMove(icon, { pointerId: 1, clientX: 20, clientY: 200 });
-  fireEvent.pointerUp(icon, { pointerId: 1 });
+  fireEvent.pointerDown(source, { pointerId: 1, button: 0, clientX: 20, clientY: 50 });
+  fireEvent.pointerMove(source, { pointerId: 1, clientX: 20, clientY: 200 });
+  await waitFor(() => expect(screen.getByText("拖到这里移除快捷入口")).toBeInTheDocument());
+  fireEvent.pointerUp(source, { pointerId: 1 });
   expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({
     type: "navigation/setVisibleItemKeys", payload: ["settings", "video"],
   }));
@@ -48,7 +49,7 @@ it("removes a shortcut when dropped on the visible remove area", async () => {
   render(<MemoryRouter><BasicLayout>内容</BasicLayout></MemoryRouter>);
   const source = screen.getByRole("link", { name: "视频管理" });
   const icon = source.querySelector(".MuiListItemIcon-root") as HTMLElement;
-  icon.setPointerCapture = vi.fn();
+  source.setPointerCapture = vi.fn();
   fireEvent.pointerDown(icon, { pointerId: 1, button: 0, clientX: 20, clientY: 50 });
   const remove = await screen.findByText("拖到这里移除快捷入口");
   Object.defineProperty(document, "elementFromPoint", { configurable: true, value: vi.fn(() => remove) });
@@ -57,4 +58,18 @@ it("removes a shortcut when dropped on the visible remove area", async () => {
   expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({
     type: "navigation/setVisibleItemKeys", payload: ["settings"],
   }));
+});
+
+it("still navigates when the row is clicked without dragging", () => {
+  function LocationProbe() {
+    return <span data-testid="location">{useLocation().pathname}</span>;
+  }
+  render(<MemoryRouter><BasicLayout>内容</BasicLayout><LocationProbe /></MemoryRouter>);
+  const source = screen.getByRole("link", { name: "视频管理" });
+  source.setPointerCapture = vi.fn();
+  fireEvent.pointerDown(source, { pointerId: 1, button: 0, clientX: 20, clientY: 50 });
+  fireEvent.pointerUp(source, { pointerId: 1 });
+  fireEvent.click(source);
+  expect(screen.getByTestId("location")).toHaveTextContent("/video");
+  expect(mocks.dispatch).not.toHaveBeenCalled();
 });
