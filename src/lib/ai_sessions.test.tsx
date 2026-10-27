@@ -44,7 +44,10 @@ afterEach(cleanup);
 describe("Canvas Agent lifetime", () => {
   it("retains pending, completed messages and draft across unmount, and sends history only once", async () => {
     const session = new CanvasAgentSession();
-    const reply = deferred<string>(); mocks.invoke.mockReturnValue(reply.promise);
+    const reply = deferred<string>();
+    mocks.invoke.mockImplementation((command: string) => command === "read_account_info"
+      ? Promise.resolve({ current_account: "Default" }) : command === "list_personal_events"
+      ? Promise.resolve([]) : reply.promise);
     const view = renderHook(() => useAISession(session));
     let sending!: Promise<void>;
     act(() => { session.update({ maxTurns: "8", input: "快捷提问前的草稿" }); sending = session.send("第一问"); });
@@ -54,26 +57,37 @@ describe("Canvas Agent lifetime", () => {
     expect(returned.result.current.loading).toBe(true);
     expect(returned.result.current.messages[0].content).toBe("第一问");
     expect(returned.result.current.input).toBe("快捷提问前的草稿");
-    expect(mocks.invoke).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "canvas_agent_chat")).toHaveLength(1));
+    const firstArgs = mocks.invoke.mock.calls.find(([command]) => command === "canvas_agent_chat")![1];
+    expect(Number.isFinite(Date.parse(firstArgs.sentAt))).toBe(true);
+    expect(firstArgs.utcOffsetMinutes).toBe(-new Date(firstArgs.sentAt).getTimezoneOffset());
     await act(async () => { reply.resolve("第一答"); await sending; });
     act(() => session.update({ input: "未发送草稿" }));
     returned.unmount();
     const again = renderHook(() => useAISession(session));
     expect(again.result.current).toMatchObject({ loading: false, input: "未发送草稿", maxTurns: "8" });
-    mocks.invoke.mockResolvedValue("第二答");
+    mocks.invoke.mockImplementation((command: string) => command === "read_account_info"
+      ? Promise.resolve({ current_account: "Default" }) : command === "list_personal_events"
+      ? Promise.resolve([]) : Promise.resolve("第二答"));
     await act(() => session.send("第二问"));
-    expect(mocks.invoke.mock.calls[1][1].messages).toEqual([
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "canvas_agent_chat")[1][1].messages).toEqual([
       { role: "user", content: "第一问" }, { role: "assistant", content: "第一答" }, { role: "user", content: "第二问" },
     ]);
   });
 
   it("keeps errors after leaving and ignores old-account results", async () => {
     const session = new CanvasAgentSession();
-    const failed = deferred<string>(); mocks.invoke.mockReturnValue(failed.promise);
+    const failed = deferred<string>();
+    mocks.invoke.mockImplementation((command: string) => command === "read_account_info"
+      ? Promise.resolve({ current_account: "Default" }) : command === "list_personal_events"
+      ? Promise.resolve([]) : failed.promise);
     const first = session.send("问题");
     failed.reject(new Error("服务不可用")); await first;
     expect(session.getSnapshot().messages[1]).toMatchObject({ error: true, pending: false });
-    const late = deferred<string>(); mocks.invoke.mockReturnValue(late.promise);
+    const late = deferred<string>();
+    mocks.invoke.mockImplementation((command: string) => command === "read_account_info"
+      ? Promise.resolve({ current_account: "Default" }) : command === "list_personal_events"
+      ? Promise.resolve([]) : late.promise);
     const second = session.send("旧账号问题");
     session.reset(); late.resolve("旧账号回答"); await second;
     expect(session.getSnapshot()).toMatchObject({ loading: false, messages: [] });

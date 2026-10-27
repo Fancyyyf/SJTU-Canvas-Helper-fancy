@@ -1,10 +1,12 @@
 {
   "name": "canvas",
   "private": true,
-  "version": "3.0.16",
+  "version": "3.0.17",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "app:dev": "tauri dev --config src-tauri/tauri.local.conf.json",
+    "build:preview:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-local-preview.ps1",
     "build": "tsc && vite build",
     "build:release:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-local-release.ps1",
     "preview": "vite preview",
@@ -53,6 +55,7 @@
     "highlight.js": "^11.11.1",
     "hls.js": "^1.7.3",
     "html2canvas": "^1.4.1",
+    "ical.js": "^2.2.1",
     "js-base64": "^3.7.7",
     "jspdf": "^4.2.1",
     "jszip": "^3.10.1",

@@ -4,6 +4,11 @@ import ArrowForwardRoundedIcon from "@mui/icons-material/ArrowForwardRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import CalendarMonthRoundedIcon from "@mui/icons-material/CalendarMonthRounded";
 import EventAvailableRoundedIcon from "@mui/icons-material/EventAvailableRounded";
+import AddRoundedIcon from "@mui/icons-material/AddRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
+import UploadFileRoundedIcon from "@mui/icons-material/UploadFileRounded";
 import KeyboardDoubleArrowLeftRoundedIcon from "@mui/icons-material/KeyboardDoubleArrowLeftRounded";
 import TodayRoundedIcon from "@mui/icons-material/TodayRounded";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
@@ -16,6 +21,10 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Link as MuiLink,
   MenuItem,
   Stack,
@@ -25,7 +34,7 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import dayjs, { Dayjs } from "dayjs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent } from "react";
 import { Link as RouterLink } from "react-router-dom";
 
 import BasicLayout from "../components/layout";
@@ -33,8 +42,40 @@ import { WorkspaceHero } from "../components/workspace_hero";
 import { useCourses } from "../lib/hooks";
 import { logHandledError } from "../lib/logger";
 import { useAppMessage } from "../lib/message";
-import { Assignment, CalendarEvent, Colors, Course } from "../lib/model";
+import { CalendarEvent, Colors } from "../lib/model";
 import { filterCalendarEvents, isAssignmentEvent, isCompletedAssignment, type AssignmentFilter } from "../lib/calendar_filter";
+import { cachedAssignmentToEvent, getCanvasCalendarRevision, getCanvasCalendarSyncState, readCanvasCalendarSnapshot, subscribeCanvasCalendar, syncCanvasCalendar } from "../lib/canvas_calendar_cache";
+import { createPersonalEvent, mergeImportedEvents, parseIcsEvents, loadPersonalEvents, persistPersonalEvents as saveNativePersonalEvents, validatePersonalEvent, type PersonalEvent, type PersonalEventDraft } from "../lib/personal_calendar";
+
+type CalendarEntry = CalendarEvent | PersonalEvent;
+
+function isPersonalEvent(event: CalendarEntry): event is PersonalEvent {
+  return "startAt" in event;
+}
+
+function getEntryMoment(event: CalendarEntry) {
+  return isPersonalEvent(event) ? dayjs(event.startAt) : getEventMoment(event);
+}
+
+function getEntryLabel(event: CalendarEntry) {
+  return isPersonalEvent(event) ? "个人日程" : event.context_name;
+}
+
+function dateTimeInput(date: Dayjs) {
+  return date.format("YYYY-MM-DDTHH:mm");
+}
+
+function personalEventRange(event: PersonalEvent) {
+  const start = dayjs(event.startAt);
+  const end = dayjs(event.endAt);
+  if (event.allDay) {
+    const lastDay = end.subtract(1, "day");
+    return start.isSame(lastDay, "day")
+      ? `${start.format("YYYY/MM/DD")} 全天`
+      : `${start.format("YYYY/MM/DD")} – ${lastDay.format("YYYY/MM/DD")} 全天`;
+  }
+  return `${start.format("YYYY/MM/DD HH:mm")} – ${end.format("YYYY/MM/DD HH:mm")}`;
+}
 
 const weekdayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const monthOptions = [
@@ -63,50 +104,6 @@ function getEventMoment(event: CalendarEvent) {
   return dayjs(event.end_at || event.start_at || event.assignment?.due_at || null);
 }
 
-function assignmentToCalendarEvent(assignment: Assignment, course: Course): CalendarEvent {
-  const dueAt = assignment.due_at;
-  return {
-    title: assignment.name,
-    workflow_state: assignment.published ? "published" : "unpublished",
-    id: `assignment_${course.id}_${assignment.id}`,
-    type_field: "assignment",
-    assignment,
-    html_url: assignment.html_url,
-    end_at: dueAt,
-    start_at: dueAt,
-    context_code: `course_${course.id}`,
-    context_name: course.name,
-    url: assignment.html_url,
-    important_dates: true,
-  };
-}
-
-function eventIdentity(event: CalendarEvent) {
-  return event.assignment?.id > 0
-    ? `${event.context_code}:assignment_${event.assignment.id}`
-    : `${event.context_code}:event_${event.id}`;
-}
-
-function dedupeEvents(rawEvents: CalendarEvent[]) {
-  const seen = new Set<string>();
-  return rawEvents.filter((event) => {
-    if (!getEventMoment(event).isValid()) return false;
-    const identity = eventIdentity(event);
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  });
-}
-
-function eventsWithinRange(events: CalendarEvent[], startDate: string, endDate: string) {
-  const start = dayjs(startDate).valueOf();
-  const end = dayjs(endDate).valueOf();
-  return events.filter((event) => {
-    const timestamp = getEventMoment(event).valueOf();
-    return Number.isFinite(timestamp) && timestamp >= start && timestamp <= end;
-  });
-}
-
 function getDateKey(date: Dayjs) {
   return date.format("YYYY-MM-DD");
 }
@@ -124,246 +121,106 @@ export default function CalendarPage() {
   const [currentMonth, setCurrentMonth] = useState<Dayjs>(dayjs());
   const [selectedDate, setSelectedDate] = useState<Dayjs>(dayjs());
   const [colors, setColors] = useState<Colors | undefined>();
-  const [contextCodes, setContextCodes] = useState<string[]>([]);
-  const [events, setEvents] = useState<CalendarEvent[]>([]);
-  const [hintEvents, setHintEvents] = useState<CalendarEvent[]>([]);
   const [assignmentFilter, setAssignmentFilter] = useState<AssignmentFilter>("all");
-  const [loading, setLoading] = useState<boolean>(false);
-  const [calendarFallbackActive, setCalendarFallbackActive] = useState(false);
-  const [assignmentLoadWarning, setAssignmentLoadWarning] = useState("");
-  const currentMonthRef = useRef<Dayjs>(dayjs());
-  const loadingRef = useRef(false);
-  const changeMonthRef = useRef<(date: Dayjs) => Promise<void>>();
-  const contextCodesRef = useRef<string[]>([]);
-  const assignmentDueEventsRef = useRef<CalendarEvent[]>([]);
-  const courseScopeKey = courses.data.map((course) => course.id).join(",");
-  loadingRef.current = loading;
+  const [account, setAccount] = useState<string | null>(null);
+  const [personalEvents, setPersonalEvents] = useState<PersonalEvent[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftStart, setDraftStart] = useState("");
+  const [draftEnd, setDraftEnd] = useState("");
+  const [draftAllDay, setDraftAllDay] = useState(false);
+  const [draftDescription, setDraftDescription] = useState("");
+  const [importPreview, setImportPreview] = useState<{ name: string; events: PersonalEventDraft[]; warnings: string[] } | null>(null);
+  const cacheRevision = useSyncExternalStore(subscribeCanvasCalendar, getCanvasCalendarRevision);
+  const syncState = getCanvasCalendarSyncState();
+  const snapshot = useMemo(() => {
+    void cacheRevision; // A cache write triggers this re-read.
+    return account ? readCanvasCalendarSnapshot(account) : null;
+  }, [account, cacheRevision]);
+  const loading = syncState.syncing && syncState.account === account;
+
+  useEffect(() => {
+    let active = true;
+    void invoke<{ current_account: string }>("read_account_info")
+      .then(async (info) => {
+        if (!active) return;
+        const nextAccount = info.current_account || "local";
+        const storedEvents = await loadPersonalEvents(nextAccount);
+        if (!active) return;
+        setAccount(nextAccount);
+        setPersonalEvents(storedEvents);
+      })
+      .catch((error) => {
+        if (active) {
+          setAccount(null);
+          setPersonalEvents([]);
+          messageApi.error(`读取个人日程失败：${error}`);
+        }
+      });
+    return () => { active = false; };
+  }, [messageApi]);
 
   useEffect(() => {
     const handleKeyDownEvent = (event: KeyboardEvent) => {
-      if (loadingRef.current || event.repeat) return;
-      if (event.key === "ArrowRight") void changeMonthRef.current?.(currentMonthRef.current.add(1, "month"));
-      if (event.key === "ArrowLeft") void changeMonthRef.current?.(currentMonthRef.current.subtract(1, "month"));
+      const target = event.target as HTMLElement;
+      if (event.repeat || editorOpen || importPreview || target.closest("input, textarea, [contenteditable=true]")) return;
+      const delta = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+      if (!delta) return;
+      setCurrentMonth((previous) => {
+        const next = previous.add(delta, "month");
+        setSelectedDate(next);
+        return next;
+      });
     };
     document.body.addEventListener("keydown", handleKeyDownEvent, true);
     return () => {
       document.body.removeEventListener("keydown", handleKeyDownEvent, true);
     };
-  }, []);
+  }, [editorOpen, importPreview]);
 
   useEffect(() => {
-    void init(courses.data);
-    // The key changes only when the globally filtered course scope changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [courseScopeKey]);
+    if (!account) return;
+    void invoke<Colors>("get_colors")
+      .then(setColors)
+      .catch((error) => logHandledError({
+        code: "CALENDAR.COLORS_FAILED", scope: "calendar", action: "get_colors",
+        error, userMessage: "课程颜色加载失败，已使用默认颜色。", recoverable: true,
+        fallback: { used: true, strategy: "default_course_color", result: "success" },
+      }));
+  }, [account]);
 
-  useEffect(() => {
-    currentMonthRef.current = currentMonth;
-  }, [currentMonth]);
-
-  useEffect(() => {
-    contextCodesRef.current = contextCodes;
-  }, [contextCodes]);
-
-  const getColors = () => invoke("get_colors");
-
-  const handleGetCalendarEvents = async (
-    nextContextCodes: string[],
-    startDate: string,
-    endDate: string
-  ) => {
-    return (await invoke("list_calendar_events", {
-      contextCodes: nextContextCodes,
-      startDate,
-      endDate,
-    })) as CalendarEvent[];
-  };
-
-  const loadAssignmentDueEvents = async (scopedCourses: Course[]) => {
-    const results = await Promise.allSettled(
-      scopedCourses.map(async (course) => ({
-        course,
-        assignments: (await invoke("list_course_assignments", {
-          courseId: course.id,
-        })) as Assignment[],
-      }))
-    );
-    const dueEvents: CalendarEvent[] = [];
-    const failedCourses: string[] = [];
-
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        failedCourses.push(scopedCourses[index].name);
-        return;
-      }
-      result.value.assignments.forEach((assignment) => {
-        if (assignment.due_at && dayjs(assignment.due_at).isValid()) {
-          dueEvents.push(assignmentToCalendarEvent(assignment, result.value.course));
-        }
-      });
-    });
-
-    if (failedCourses.length > 0) {
-      setAssignmentLoadWarning(
-        `${failedCourses.length} 门课程的作业接口加载失败；已继续显示其余课程及 Canvas 日历返回的事项。`
-      );
-      logHandledError({
-        code: "CALENDAR.ASSIGNMENT_FALLBACK_PARTIAL",
-        scope: "calendar",
-        action: "load_course_assignments",
-        error: new Error(`Failed courses: ${failedCourses.join(", ")}`),
-        userMessage: "部分课程的作业截止日期加载失败。",
-        recoverable: true,
-        fallback: {
-          used: true,
-          strategy: "keep_successful_courses_and_calendar_events",
-          result: "success",
-        },
-      });
-    } else {
-      setAssignmentLoadWarning("");
-    }
-    return dueEvents;
-  };
-
-  const loadCalendarRange = async (
-    nextContextCodes: string[],
-    startDate: string,
-    endDate: string,
-    assignmentDueEvents: CalendarEvent[]
-  ) => {
-    const assignmentEventsInRange = eventsWithinRange(
-      assignmentDueEvents,
-      startDate,
-      endDate
-    );
-    if (nextContextCodes.length === 0) return assignmentEventsInRange;
-
-    try {
-      const calendarEvents = await handleGetCalendarEvents(
-        nextContextCodes,
-        startDate,
-        endDate
-      );
-      // Course assignments carry the current user's submission state. Keep them
-      // when the calendar API reports the same deadline without that detail.
-      return dedupeEvents([...assignmentEventsInRange, ...calendarEvents]);
-    } catch (error) {
-      setCalendarFallbackActive(true);
-      logHandledError({
-        code: "CALENDAR.EVENT_API_FAILED",
-        scope: "calendar",
-        action: "list_calendar_events",
-        error,
-        userMessage: "Canvas 日历接口不可用，已改用课程作业截止日期。",
-        recoverable: true,
-        fallback: {
-          used: true,
-          strategy: "course_assignment_due_dates",
-          result: "success",
-        },
-        context: { startDate, endDate, courseCount: nextContextCodes.length },
-      });
-      return dedupeEvents(assignmentEventsInRange);
-    }
-  };
-
-  const handleInitCalendarEvents = async (
-    nextContextCodes: string[],
-    date: Dayjs,
-    assignmentDueEvents = assignmentDueEventsRef.current
-  ) => {
-    loadingRef.current = true;
-    setLoading(true);
-    try {
-      const gridDates = getMonthGridDates(date);
-      const startDate = gridDates[0].startOf("day").toISOString();
-      const endDate = gridDates[gridDates.length - 1].endOf("day").toISOString();
-      const rawEvents = await loadCalendarRange(
-        nextContextCodes,
-        startDate,
-        endDate,
-        assignmentDueEvents
-      );
-      setEvents(dedupeEvents(rawEvents));
-    } catch (error) {
-      messageApi.error(`日历加载失败：${error}`);
-    } finally {
-      loadingRef.current = false;
-      setLoading(false);
-    }
-  };
-
-  const getHints = async (
-    nextContextCodes: string[],
-    assignmentDueEvents = assignmentDueEventsRef.current
-  ) => {
-    try {
-      const now = dayjs().toISOString();
-      const afterAWeek = dayjs().add(7, "day").toISOString();
-      const rawEvents = await loadCalendarRange(
-        nextContextCodes,
-        now,
-        afterAWeek,
-        assignmentDueEvents
-      );
-      const deduped = dedupeEvents(rawEvents).sort(
-        (a, b) => getEventMoment(a).valueOf() - getEventMoment(b).valueOf()
-      );
-      setHintEvents(deduped);
-    } catch (error) {
-      messageApi.error(`七日提醒加载失败：${error}`);
-    }
-  };
-
-  const init = async (scopedCourses: Course[]) => {
-    const nextContextCodes = scopedCourses.map((course) => `course_${course.id}`);
-    setCalendarFallbackActive(false);
-    if (scopedCourses.length === 0) {
-      assignmentDueEventsRef.current = [];
-      setContextCodes([]);
-      setEvents([]);
-      setHintEvents([]);
-      return;
-    }
-
-    const [colorResult, assignmentDueEvents] = await Promise.all([
-      getColors()
-        .then((value) => value as Colors)
-        .catch((error) => {
-          logHandledError({
-            code: "CALENDAR.COLORS_FAILED",
-            scope: "calendar",
-            action: "get_colors",
-            error,
-            userMessage: "课程颜色加载失败，已使用默认颜色。",
-            recoverable: true,
-            fallback: { used: true, strategy: "default_course_color", result: "success" },
-          });
-          return { custom_colors: {} } as Colors;
-        }),
-      loadAssignmentDueEvents(scopedCourses),
-    ]);
-
-    assignmentDueEventsRef.current = assignmentDueEvents;
-    setColors(colorResult);
-    setContextCodes(nextContextCodes);
-    await Promise.all([
-      handleInitCalendarEvents(nextContextCodes, currentMonth, assignmentDueEvents),
-      getHints(nextContextCodes, assignmentDueEvents),
-    ]);
-  };
-
-  const handleMonthChange = async (date: Dayjs) => {
-    currentMonthRef.current = date;
+  const handleMonthChange = (date: Dayjs) => {
     setCurrentMonth(date);
     setSelectedDate(date);
-    setCalendarFallbackActive(false);
-    await handleInitCalendarEvents(contextCodesRef.current, date);
   };
-  changeMonthRef.current = handleMonthChange;
 
   const monthGridDates = useMemo(() => getMonthGridDates(currentMonth), [currentMonth]);
+
+  const scopedCanvasEvents = useMemo(() => {
+    const all = (snapshot?.assignments ?? []).map(cachedAssignmentToEvent);
+    if (courses.isLoading || courses.error || courses.data.length === 0) return all;
+    const codes = new Set(courses.data.map((course) => `course_${course.id}`));
+    return all.filter((event) => codes.has(event.context_code));
+  }, [snapshot, courses.isLoading, courses.error, courses.data]);
+
+  const events = useMemo(() => {
+    const first = monthGridDates[0].startOf("day").valueOf();
+    const last = monthGridDates[monthGridDates.length - 1].endOf("day").valueOf();
+    return scopedCanvasEvents.filter((event) => {
+      const time = getEventMoment(event).valueOf();
+      return time >= first && time <= last;
+    });
+  }, [scopedCanvasEvents, monthGridDates]);
+
+  const hintEvents = useMemo(() => {
+    const now = dayjs().valueOf();
+    const week = dayjs().add(7, "day").valueOf();
+    return scopedCanvasEvents.filter((event) => {
+      const time = getEventMoment(event).valueOf();
+      return time >= now && time <= week;
+    });
+  }, [scopedCanvasEvents]);
 
   const visibleEvents = useMemo(
     () => filterCalendarEvents(events, assignmentFilter),
@@ -374,51 +231,174 @@ export default function CalendarPage() {
     [hintEvents, assignmentFilter]
   );
 
+  const displayedEvents = useMemo<CalendarEntry[]>(() => {
+    const first = monthGridDates[0].startOf("day").valueOf();
+    const last = monthGridDates[monthGridDates.length - 1].endOf("day").valueOf();
+    return [...visibleEvents, ...personalEvents.filter((event) =>
+      dayjs(event.endAt).valueOf() > first && dayjs(event.startAt).valueOf() <= last
+    )];
+  }, [monthGridDates, visibleEvents, personalEvents]);
+
+  const displayedHints = useMemo<CalendarEntry[]>(() => {
+    const now = dayjs().valueOf();
+    const week = dayjs().add(7, "day").valueOf();
+    return [...visibleHintEvents, ...personalEvents.filter((event) =>
+      dayjs(event.endAt).valueOf() > now && dayjs(event.startAt).valueOf() <= week
+    )].sort((a, b) => getEntryMoment(a).valueOf() - getEntryMoment(b).valueOf());
+  }, [visibleHintEvents, personalEvents]);
+
   const eventsByDate = useMemo(() => {
-    const grouped = new Map<string, CalendarEvent[]>();
-    for (const event of visibleEvents) {
-      const key = getDateKey(getEventMoment(event));
-      const current = grouped.get(key) ?? [];
-      current.push(event);
-      grouped.set(key, current);
+    const grouped = new Map<string, CalendarEntry[]>();
+    for (const event of displayedEvents) {
+      const eventFirst = getEntryMoment(event).startOf("day");
+      const eventLast = isPersonalEvent(event)
+        ? dayjs(event.endAt).subtract(1, "millisecond").startOf("day") : eventFirst;
+      const first = eventFirst.isBefore(monthGridDates[0]) ? monthGridDates[0] : eventFirst;
+      const last = eventLast.isAfter(monthGridDates[monthGridDates.length - 1])
+        ? monthGridDates[monthGridDates.length - 1] : eventLast;
+      for (let date = first; !date.isAfter(last); date = date.add(1, "day")) {
+        const key = getDateKey(date);
+        const current = grouped.get(key) ?? [];
+        current.push(event);
+        grouped.set(key, current);
+      }
     }
     for (const [key, list] of grouped) {
       grouped.set(
         key,
-        list.sort((a, b) => getEventMoment(a).valueOf() - getEventMoment(b).valueOf())
+        list.sort((a, b) => getEntryMoment(a).valueOf() - getEntryMoment(b).valueOf())
       );
     }
     return grouped;
-  }, [visibleEvents]);
+  }, [displayedEvents, monthGridDates]);
 
   const selectedDayEvents = useMemo(() => {
     return eventsByDate.get(getDateKey(selectedDate)) ?? [];
   }, [eventsByDate, selectedDate]);
 
+  const importStats = useMemo(() => {
+    if (!importPreview) return { added: 0, skipped: 0 };
+    const keys = new Set(personalEvents.map((event) => event.sourceKey).filter(Boolean));
+    let added = 0;
+    let skipped = 0;
+    for (const event of importPreview.events) {
+      if (event.sourceKey && keys.has(event.sourceKey)) skipped++;
+      else {
+        added++;
+        if (event.sourceKey) keys.add(event.sourceKey);
+      }
+    }
+    return { added, skipped };
+  }, [importPreview, personalEvents]);
+
   const statItems = useMemo(() => {
-    const thisMonthCount = visibleEvents.length;
+    const monthStart = currentMonth.startOf("month").valueOf();
+    const monthEnd = currentMonth.endOf("month").valueOf();
+    const thisMonthCount = displayedEvents.filter((event) => isPersonalEvent(event)
+      ? dayjs(event.endAt).valueOf() > monthStart && dayjs(event.startAt).valueOf() <= monthEnd
+      : getEntryMoment(event).isSame(currentMonth, "month")).length;
     const todayCount = eventsByDate.get(getDateKey(dayjs()))?.length ?? 0;
-    const urgentCount = visibleHintEvents.length;
+    const urgentCount = displayedHints.length;
     const selectedCount = selectedDayEvents.length;
     return [
       { label: "本月事项", value: `${thisMonthCount}`, icon: <CalendarMonthRoundedIcon /> },
-      { label: "今日截止", value: `${todayCount}`, icon: <WarningAmberRoundedIcon /> },
+      { label: "今日事项", value: `${todayCount}`, icon: <WarningAmberRoundedIcon /> },
       { label: "七日内事项", value: `${urgentCount}`, icon: <EventAvailableRoundedIcon /> },
       { label: "所选日期", value: `${selectedCount}`, icon: <TodayRoundedIcon /> },
     ];
-  }, [visibleEvents.length, eventsByDate, visibleHintEvents.length, selectedDayEvents.length]);
+  }, [displayedEvents, currentMonth, eventsByDate, displayedHints.length, selectedDayEvents.length]);
 
   const yearOptions = useMemo(() => {
     const currentYear = dayjs().year();
     return Array.from({ length: 11 }, (_, index) => currentYear - 5 + index);
   }, []);
 
-  const handleYearSelect = async (year: number) => {
-    await handleMonthChange(currentMonth.year(year));
+  const handleYearSelect = (year: number) => {
+    handleMonthChange(currentMonth.year(year));
   };
 
-  const handleMonthSelect = async (month: number) => {
-    await handleMonthChange(currentMonth.month(month));
+  const handleMonthSelect = (month: number) => {
+    handleMonthChange(currentMonth.month(month));
+  };
+
+  const refreshCanvas = async () => {
+    const result = await syncCanvasCalendar();
+    if (result.error) messageApi.warning(`Canvas 更新失败：${result.error}`);
+    else if (result.failedCourses.length) messageApi.warning(`已更新，其余 ${result.failedCourses.length} 门课程保留本地记录`);
+    else messageApi.success("Canvas 作业状态已更新到本地");
+    if (result.updated) await courses.mutate();
+  };
+
+  const persistPersonalEvents = async (next: PersonalEvent[]) => {
+    if (!account) return false;
+    try {
+      await saveNativePersonalEvents(account, personalEvents, next);
+      setPersonalEvents(next);
+      return true;
+    } catch (error) {
+      messageApi.error(`保存个人日程失败：${error}`);
+      void loadPersonalEvents(account).then(setPersonalEvents).catch(() => {});
+      return false;
+    }
+  };
+
+  const openEditor = (event?: PersonalEvent) => {
+    const start = event ? dayjs(event.startAt) : selectedDate.hour(9).minute(0);
+    const end = event ? dayjs(event.endAt) : start.add(1, "hour");
+    setEditingId(event?.id ?? null);
+    setDraftTitle(event?.title ?? "");
+    setDraftAllDay(event?.allDay ?? false);
+    setDraftStart(event?.allDay ? start.format("YYYY-MM-DD") : dateTimeInput(start));
+    setDraftEnd(event?.allDay ? end.subtract(1, "day").format("YYYY-MM-DD") : dateTimeInput(end));
+    setDraftDescription(event?.description ?? "");
+    setEditorOpen(true);
+  };
+
+  const saveEditor = async () => {
+    const start = dayjs(draftAllDay ? `${draftStart}T00:00` : draftStart);
+    const end = dayjs(draftAllDay ? `${draftEnd}T00:00` : draftEnd);
+    const draft: PersonalEventDraft = {
+      title: draftTitle.trim(),
+      startAt: start.isValid() ? start.toISOString() : "",
+      endAt: end.isValid() ? (draftAllDay ? end.add(1, "day") : end).toISOString() : "",
+      allDay: draftAllDay,
+      description: draftDescription.trim(),
+    };
+    const problem = validatePersonalEvent(draft);
+    if (problem) return messageApi.warning(problem);
+    const next = editingId
+      ? personalEvents.map((event) => event.id === editingId ? { ...event, ...draft } : event)
+      : [...personalEvents, createPersonalEvent(draft)];
+    if (await persistPersonalEvents(next)) {
+      setEditorOpen(false);
+      messageApi.success(editingId ? "日程已更新" : "日程已创建");
+    }
+  };
+
+  const deletePersonalEvent = async (id: string) => {
+    if (await persistPersonalEvents(personalEvents.filter((event) => event.id !== id))) {
+      messageApi.success("日程已删除");
+    }
+  };
+
+  const selectImportFile = async (file?: File) => {
+    if (!file) return;
+    if (file.size > 2_000_000) return messageApi.warning("ICS 文件不能超过 2 MB");
+    try {
+      const result = parseIcsEvents(await file.text());
+      setImportPreview({ name: file.name, ...result });
+    } catch (error) {
+      messageApi.error(`导入预览失败：${error}`);
+    }
+  };
+
+  const applyImport = async () => {
+    if (!importPreview) return;
+    const result = mergeImportedEvents(personalEvents, importPreview.events);
+    if (await persistPersonalEvents(result.events)) {
+      setImportPreview(null);
+      messageApi.success(`导入 ${result.added.length} 项，跳过 ${result.skipped} 项重复日程`);
+    }
   };
 
   return (
@@ -430,9 +410,23 @@ export default function CalendarPage() {
             chipLabel="日程管理"
             chipIcon={<CalendarMonthRoundedIcon />}
             title="日历与 DDL 工作台"
-            description="更适合扫读、排程和追踪作业截止日期的月历视图。"
+            description="先显示本地日程；打开应用或点击更新时，会同步 Canvas 作业状态。"
             aside={
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25}>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} useFlexGap flexWrap="wrap">
+                <Button variant="contained" startIcon={<AddRoundedIcon />} disabled={!account}
+                  onClick={() => openEditor()} sx={{ whiteSpace: "nowrap" }}>新建日程</Button>
+                <Button variant="outlined" component="label" startIcon={<UploadFileRoundedIcon />}
+                  disabled={!account} sx={{ whiteSpace: "nowrap" }}>
+                  导入 ICS
+                  <input hidden type="file" accept=".ics,.ical,text/calendar" onChange={(event) => {
+                    void selectImportFile(event.target.files?.[0]);
+                    event.target.value = "";
+                  }} />
+                </Button>
+                <Button variant="outlined" startIcon={loading ? <CircularProgress size={16} /> : <RefreshRoundedIcon />}
+                  disabled={!account || loading} onClick={() => void refreshCanvas()} sx={{ whiteSpace: "nowrap" }}>
+                  {loading ? "正在更新" : "更新 Canvas"}
+                </Button>
                 <TextField
                   select
                   size="small"
@@ -522,38 +516,32 @@ export default function CalendarPage() {
                         <MenuItem value="completed">已完成</MenuItem>
                         <MenuItem value="incomplete">未完成</MenuItem>
                       </TextField>
-                      <Chip icon={<AutoAwesomeRoundedIcon />} label={`显示 ${visibleEvents.length} 项`}
+                      <Chip icon={<AutoAwesomeRoundedIcon />} label={`显示 ${displayedEvents.length} 项`}
                         color="primary" variant="outlined" />
                     </Stack>
                   </Stack>
 
                   <Alert severity="info" sx={{ borderRadius: "18px" }}>
-                    点击某一天可以查看当天的截止事项，点击事项名称会跳转到对应课程的作业页。
+                    点击某一天查看当天事项；Canvas 作业可跳转课程，个人日程可编辑或删除。作业状态筛选不会隐藏个人日程。
                   </Alert>
 
-                  {calendarFallbackActive ? (
+                  <Typography variant="caption" color="text.secondary">
+                    {snapshot ? `本地 Canvas 数据更新于 ${dayjs(snapshot.updatedAt).format("YYYY/MM/DD HH:mm")}` : "尚无本地 Canvas 作业记录"}
+                    {loading ? " · 正在从 Canvas 更新作业状态" : ""}
+                  </Typography>
+
+                  {syncState.account === account && syncState.error ? (
                     <Alert severity="warning" sx={{ borderRadius: "18px" }}>
-                      Canvas 日历接口暂时不可用，当前已自动改用各课程作业接口中的截止时间。
+                      Canvas 更新失败：{syncState.error}。{snapshot ? "已继续显示本地记录。" : "尚无本地记录。"}
                     </Alert>
                   ) : null}
 
-                  {assignmentLoadWarning ? (
+                  {syncState.account === account && syncState.failedCourses.length > 0 ? (
                     <Alert severity="warning" sx={{ borderRadius: "18px" }}>
-                      {assignmentLoadWarning}
+                      {syncState.failedCourses.length} 门课程更新失败；这些课程继续使用上次保存的作业状态。
                     </Alert>
                   ) : null}
 
-                  {loading ? (
-                    <Box
-                      sx={{
-                        minHeight: 420,
-                        display: "grid",
-                        placeItems: "center",
-                      }}
-                    >
-                      <CircularProgress />
-                    </Box>
-                  ) : (
                     <Box sx={{ display: "grid", gap: 1.25 }}>
                       <Box
                         sx={{
@@ -649,23 +637,31 @@ export default function CalendarPage() {
                                   {dayEvents.slice(0, 3).map((event) => (
                                     <Tooltip
                                       key={event.id}
-                                      title={`${event.context_name} · ${getEventMoment(event).format(
-                                        "MM/DD HH:mm"
+                                      title={`${getEntryLabel(event)} · ${getEntryMoment(event).format(
+                                        isPersonalEvent(event) && event.allDay ? "MM/DD 全天" : "MM/DD HH:mm"
                                       )}`}
                                       placement="top"
                                     >
-                                      <MuiLink
-                                        component={RouterLink}
-                                        to={`/assignments?id=${getCourseId(event)}`}
-                                        underline="none"
-                                        onClick={(eventClick) => eventClick.stopPropagation()}
+                                      <Box
+                                        component={isPersonalEvent(event) ? "button" : RouterLink}
+                                        {...(isPersonalEvent(event) ? { type: "button" as const } : { to: `/assignments?id=${getCourseId(event)}` })}
+                                        onClick={(eventClick: MouseEvent) => {
+                                          eventClick.stopPropagation();
+                                          if (isPersonalEvent(event)) openEditor(event);
+                                        }}
                                         sx={{
                                           display: "block",
+                                          width: "100%",
+                                          textAlign: "left",
+                                          border: 0,
+                                          cursor: "pointer",
+                                          textDecoration: "none",
+                                          font: "inherit",
                                           px: 1,
                                           py: 0.7,
                                           borderRadius: "12px",
                                           bgcolor: alpha(
-                                            colors?.custom_colors[event.context_code] || "#2563eb",
+                                            isPersonalEvent(event) ? "#7c3aed" : colors?.custom_colors[event.context_code] || "#2563eb",
                                             0.12
                                           ),
                                           color: "text.primary",
@@ -673,18 +669,18 @@ export default function CalendarPage() {
                                           textOverflow: "ellipsis",
                                           whiteSpace: "nowrap",
                                           borderLeft: `4px solid ${
-                                            colors?.custom_colors[event.context_code] || "#2563eb"
+                                            isPersonalEvent(event) ? "#7c3aed" : colors?.custom_colors[event.context_code] || "#2563eb"
                                           }`,
                                           "&:hover": {
                                             bgcolor: alpha(
-                                              colors?.custom_colors[event.context_code] || "#2563eb",
+                                              isPersonalEvent(event) ? "#7c3aed" : colors?.custom_colors[event.context_code] || "#2563eb",
                                               0.18
                                             ),
                                           },
                                         }}
                                       >
-                                        {isAssignmentEvent(event) && isCompletedAssignment(event) ? "✓ " : ""}{event.title}
-                                      </MuiLink>
+                                        {!isPersonalEvent(event) && isAssignmentEvent(event) && isCompletedAssignment(event) ? "✓ " : ""}{event.title}
+                                      </Box>
                                     </Tooltip>
                                   ))}
                                   {dayEvents.length > 3 && (
@@ -699,7 +695,6 @@ export default function CalendarPage() {
                         })}
                       </Box>
                     </Box>
-                  )}
                 </Stack>
               </CardContent>
             </Card>
@@ -715,15 +710,15 @@ export default function CalendarPage() {
                       </Typography>
                     </Box>
 
-                    {visibleHintEvents.length === 0 ? (
+                    {displayedHints.length === 0 ? (
                       <Alert severity="success" sx={{ borderRadius: "18px" }}>
-                        暂无临近 DDL，尽情享受当下。
+                        暂无临近事项。
                       </Alert>
                     ) : (
                       <Stack spacing={1.25}>
-                        {visibleHintEvents.map((event) => {
+                        {displayedHints.map((event) => {
                           const now = dayjs();
-                          const diff = getEventMoment(event).diff(now, "hour");
+                          const diff = getEntryMoment(event).diff(now, "hour");
                           const days = Math.floor(diff / 24);
                           const hours = diff % 24;
 
@@ -738,26 +733,26 @@ export default function CalendarPage() {
                               }}
                             >
                               <Stack spacing={0.7}>
-                                <MuiLink
-                                  component={RouterLink}
-                                  to={`/assignments?id=${getCourseId(event)}`}
-                                  underline="hover"
-                                  sx={{ fontWeight: 700, color: "text.primary" }}
-                                >
-                                  {event.title}
-                                </MuiLink>
+                                {isPersonalEvent(event) ? (
+                                  <Button onClick={() => openEditor(event)} sx={{ alignSelf: "flex-start", p: 0, textTransform: "none" }}>{event.title}</Button>
+                                ) : (
+                                  <MuiLink component={RouterLink} to={`/assignments?id=${getCourseId(event)}`}
+                                    underline="hover" sx={{ fontWeight: 700, color: "text.primary" }}>{event.title}</MuiLink>
+                                )}
                                 <Typography variant="body2" color="text.secondary">
-                                  {event.context_name}
+                                  {getEntryLabel(event)}
                                 </Typography>
-                                {isAssignmentEvent(event) && <Chip size="small" variant="outlined"
+                                {!isPersonalEvent(event) && isAssignmentEvent(event) && <Chip size="small" variant="outlined"
                                   color={isCompletedAssignment(event) ? "success" : "warning"}
                                   label={isCompletedAssignment(event) ? "已完成" : "未完成"} sx={{ width: "fit-content" }} />}
                                 <Chip
                                   size="small"
                                   color={days <= 1 ? "warning" : "default"}
-                                  label={isCompletedAssignment(event)
-                                    ? `截止于 ${getEventMoment(event).format("MM/DD HH:mm")}`
-                                    : `还有 ${days} 天 ${hours} 小时`}
+                                  label={isPersonalEvent(event)
+                                    ? personalEventRange(event)
+                                    : isCompletedAssignment(event)
+                                      ? `截止于 ${getEntryMoment(event).format("MM/DD HH:mm")}`
+                                      : `还有 ${days} 天 ${hours} 小时`}
                                   sx={{ width: "fit-content" }}
                                 />
                               </Stack>
@@ -778,14 +773,14 @@ export default function CalendarPage() {
                         {selectedDate.format("M 月 D 日")} 事项
                       </Typography>
                       <Typography variant="body2" color="text.secondary">
-                        选中日期后，这里会显示当天所有作业与截止事项。
+                        选中日期后，这里会显示当天所有作业与个人日程。
                       </Typography>
                     </Box>
                     <Divider />
 
                     {selectedDayEvents.length === 0 ? (
                       <Typography variant="body2" color="text.secondary">
-                        这一天没有记录到截止事项。
+                        这一天没有日程。
                       </Typography>
                     ) : (
                       <Stack spacing={1.25}>
@@ -800,23 +795,27 @@ export default function CalendarPage() {
                             }}
                           >
                             <Stack spacing={0.7}>
-                              <MuiLink
-                                component={RouterLink}
-                                to={`/assignments?id=${getCourseId(event)}`}
-                                underline="hover"
-                                sx={{ fontWeight: 700, color: "text.primary" }}
-                              >
-                                {event.title}
-                              </MuiLink>
+                              {isPersonalEvent(event) ? (
+                                <Typography fontWeight={700}>{event.title}</Typography>
+                              ) : (
+                                <MuiLink component={RouterLink} to={`/assignments?id=${getCourseId(event)}`}
+                                  underline="hover" sx={{ fontWeight: 700, color: "text.primary" }}>{event.title}</MuiLink>
+                              )}
                               <Typography variant="body2" color="text.secondary">
-                                {event.context_name}
+                                {getEntryLabel(event)}
                               </Typography>
-                              {isAssignmentEvent(event) && <Chip size="small" variant="outlined"
+                              {!isPersonalEvent(event) && isAssignmentEvent(event) && <Chip size="small" variant="outlined"
                                 color={isCompletedAssignment(event) ? "success" : "warning"}
                                 label={isCompletedAssignment(event) ? "已完成" : "未完成"} sx={{ width: "fit-content" }} />}
                               <Typography variant="caption" color="text.secondary">
-                                截止时间：{getEventMoment(event).format("YYYY/MM/DD HH:mm")}
+                                {isPersonalEvent(event) ? `时间：${personalEventRange(event)}` : `截止时间：${getEntryMoment(event).format("YYYY/MM/DD HH:mm")}`}
                               </Typography>
+                              {isPersonalEvent(event) && event.description && <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>{event.description}</Typography>}
+                              {isPersonalEvent(event) && <Stack direction="row" spacing={1}>
+                                <Button size="small" startIcon={<EditOutlinedIcon />} onClick={() => openEditor(event)}>编辑</Button>
+                                <Button size="small" color="error" startIcon={<DeleteOutlineRoundedIcon />}
+                                  onClick={() => deletePersonalEvent(event.id)}>删除</Button>
+                              </Stack>}
                             </Stack>
                           </Box>
                         ))}
@@ -830,6 +829,55 @@ export default function CalendarPage() {
         </Stack>
 
       </Box>
+      <Dialog open={editorOpen} onClose={() => setEditorOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>{editingId ? "编辑日程" : "新建日程"}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <TextField label="日程名称" required value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} autoFocus />
+            <TextField select label="时间类型" value={draftAllDay ? "all-day" : "timed"}
+              onChange={(event) => {
+                const allDay = event.target.value === "all-day";
+                setDraftAllDay(allDay);
+                setDraftStart(allDay ? draftStart.slice(0, 10) : `${draftStart.slice(0, 10)}T09:00`);
+                setDraftEnd(allDay ? draftEnd.slice(0, 10) : `${draftEnd.slice(0, 10)}T10:00`);
+              }}>
+              <MenuItem value="timed">指定时间</MenuItem>
+              <MenuItem value="all-day">全天</MenuItem>
+            </TextField>
+            <TextField label="开始" type={draftAllDay ? "date" : "datetime-local"} value={draftStart}
+              onChange={(event) => setDraftStart(event.target.value)} InputLabelProps={{ shrink: true }} />
+            <TextField label={draftAllDay ? "结束日期（含）" : "结束"} type={draftAllDay ? "date" : "datetime-local"} value={draftEnd}
+              onChange={(event) => setDraftEnd(event.target.value)} InputLabelProps={{ shrink: true }} />
+            <TextField label="备注（可选）" value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} multiline minRows={3} />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditorOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={saveEditor}>保存</Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog open={Boolean(importPreview)} onClose={() => setImportPreview(null)} fullWidth maxWidth="sm">
+        <DialogTitle>导入日程预览</DialogTitle>
+        <DialogContent>
+          {importPreview && <Stack spacing={2} sx={{ pt: 1 }}>
+            <Typography variant="body2">{importPreview.name}：识别 {importPreview.events.length} 项，新增 {importStats.added} 项，重复 {importStats.skipped} 项。</Typography>
+            {importPreview.warnings.length > 0 && <Alert severity="warning">{importPreview.warnings.slice(0, 5).join("；")}{importPreview.warnings.length > 5 ? `；另有 ${importPreview.warnings.length - 5} 条提示` : ""}</Alert>}
+            <Box sx={{ maxHeight: 280, overflowY: "auto" }}>
+              {importPreview.events.slice(0, 30).map((event, index) => (
+                <Typography key={`${event.sourceKey ?? index}-${index}`} variant="body2" sx={{ py: 0.5 }}>
+                  {dayjs(event.startAt).format("YYYY/MM/DD HH:mm")} · {event.title}
+                </Typography>
+              ))}
+              {importPreview.events.length > 30 && <Typography variant="caption">另有 {importPreview.events.length - 30} 项</Typography>}
+            </Box>
+          </Stack>}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setImportPreview(null)}>取消</Button>
+          <Button variant="contained" disabled={!importPreview || importStats.added === 0}
+            onClick={applyImport}>一键导入</Button>
+        </DialogActions>
+      </Dialog>
     </BasicLayout>
   );
 }

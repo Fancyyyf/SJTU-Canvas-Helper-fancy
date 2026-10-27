@@ -86,6 +86,7 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $tag = "app-v$version"
+          $notesFile = "docs/maintenance/RELEASE_$version.md"
           $assets = @(Get-ChildItem release-ci -File | ForEach-Object { $_.FullName })
           $published = $false
           foreach ($token in @($env:GITHUB_TOKEN, $env:RELEASE_TOKEN)) {
@@ -95,7 +96,11 @@ jobs:
             if ($LASTEXITCODE -eq 0) {
               gh release upload $tag @assets --clobber
             } else {
-              gh release create $tag @assets --verify-tag --title "App v$version" --notes "Download the Windows installer or portable archive from the assets below."
+              if (Test-Path $notesFile) {
+                gh release create $tag @assets --verify-tag --title "App v$version" --notes-file $notesFile
+              } else {
+                gh release create $tag @assets --verify-tag --title "App v$version" --notes "Download the Windows installer or portable archive from the assets below."
+              }
             }
             if ($LASTEXITCODE -eq 0) { $published = $true; break }
             Write-Warning "Release publication failed with the current token"

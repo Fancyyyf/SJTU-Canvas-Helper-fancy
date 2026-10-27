@@ -37,6 +37,7 @@ use tracing_subscriber::{
 use crate::app::App;
 mod app;
 mod canvas_agent;
+mod personal_calendar;
 mod client;
 mod diagnostics;
 mod error;
@@ -333,6 +334,11 @@ async fn list_courses() -> Result<Vec<Course>> {
 }
 
 #[tauri::command]
+async fn refresh_courses() -> Result<Vec<Course>> {
+    APP.refresh_courses().await
+}
+
+#[tauri::command]
 async fn list_user_submissions(
     course_id: i64,
     student_ids: Vec<i64>,
@@ -528,8 +534,28 @@ async fn chat(prompt: String) -> Result<String> {
 async fn canvas_agent_chat(
     messages: Vec<LLMChatMessage>,
     options: Option<canvas_agent::CanvasAgentOptions>,
+    calendar_snapshot: Option<canvas_agent::CanvasCalendarSnapshot>,
+    account: String,
+    sent_at: String,
+    utc_offset_minutes: i32,
 ) -> Result<String> {
-    canvas_agent::chat(&messages, options).await
+    personal_calendar::checked_account(&account)?;
+    canvas_agent::chat(&messages, options, calendar_snapshot, &sent_at, utc_offset_minutes).await
+}
+
+#[tauri::command]
+fn list_personal_events(account: String) -> Result<Vec<personal_calendar::PersonalEvent>> {
+    personal_calendar::list(&personal_calendar::checked_account(&account)?)
+}
+
+#[tauri::command]
+fn import_legacy_personal_events(account: String, events: Vec<personal_calendar::PersonalEvent>) -> Result<Vec<personal_calendar::PersonalEvent>> {
+    personal_calendar::import_legacy(&personal_calendar::checked_account(&account)?, events)
+}
+
+#[tauri::command]
+fn replace_personal_events(account: String, previous_events: Vec<personal_calendar::PersonalEvent>, events: Vec<personal_calendar::PersonalEvent>) -> Result<()> {
+    personal_calendar::replace_if_unchanged(&personal_calendar::checked_account(&account)?, previous_events, events)
 }
 
 #[tauri::command]
@@ -1311,6 +1337,7 @@ async fn main() -> Result<()> {
             read_account_info,
             list_accounts,
             list_courses,
+            refresh_courses,
             get_course_syllabus,
             list_user_submissions,
             get_full_discussion,
@@ -1427,6 +1454,9 @@ async fn main() -> Result<()> {
             // LLM
             chat,
             canvas_agent_chat,
+            list_personal_events,
+            import_legacy_personal_events,
+            replace_personal_events,
             check_balance,
             explain_file,
             chat_with_file,

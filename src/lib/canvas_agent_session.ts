@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { AISessionStore, aiMessage, aiPayload } from "./ai_session_store";
 import type { CanvasAgentChatMessage } from "./model";
 import { isAccountTransitioning } from "./account_transition";
+import { readCanvasCalendarSnapshot } from "./canvas_calendar_cache";
+import { loadPersonalEvents } from "./personal_calendar";
 
 interface AgentState {
   messages: CanvasAgentChatMessage[];
@@ -23,6 +25,8 @@ export class CanvasAgentSession extends AISessionStore<AgentState> {
 
   send = async (content: string) => {
     if (isAccountTransitioning() || this.state.loading || !content.trim()) return;
+    const sentAt = new Date();
+    const utcOffsetMinutes = -sentAt.getTimezoneOffset();
     const generation = ++this.generation;
     const history = [...this.state.messages, aiMessage("user", content.trim())];
     const pending = aiMessage("assistant", "", { pending: true });
@@ -32,7 +36,15 @@ export class CanvasAgentSession extends AISessionStore<AgentState> {
     };
     this.update({ messages: [...history, pending], loading: true });
     try {
-      const response = await invoke<string>("canvas_agent_chat", { messages: aiPayload(history), options });
+      const info = await invoke<{ current_account: string }>("read_account_info");
+      const account = info.current_account || "local";
+      await loadPersonalEvents(account);
+      if (generation !== this.generation || isAccountTransitioning()) return;
+      const calendarSnapshot = readCanvasCalendarSnapshot(account);
+      const response = await invoke<string>("canvas_agent_chat", {
+        messages: aiPayload(history), options, calendarSnapshot, account,
+        sentAt: sentAt.toISOString(), utcOffsetMinutes,
+      });
       if (generation !== this.generation) return;
       this.update({ messages: [...history, { ...pending, content: response, pending: false }] });
     } catch (error) {

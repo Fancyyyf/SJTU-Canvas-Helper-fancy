@@ -19,15 +19,15 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 | 操作系统类型 | 推荐下载 | 说明 |
 | :--- | :--- | :--- |
-| 🪟 **Windows 64 位** | [v3.0.16 安装包](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.16) | 选择 `_x64-setup.exe`，支持应用内检查、下载和启动升级安装程序 |
-| 🪟 **Windows 64 位便携版** | [v3.0.16 便携 ZIP](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.16) | 便携版升级需手动替换文件 |
+| 🪟 **Windows 64 位** | [v3.0.17 安装包](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.17) | 选择 `_x64-setup.exe`，支持应用内检查、下载和启动升级安装程序 |
+| 🪟 **Windows 64 位便携版** | [v3.0.17 便携 ZIP](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases/tag/app-v3.0.17) | 便携版升级需手动替换文件 |
 | **其他系统** | [本 fork 的 Release](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases) | 当前没有自动构建的安装包；可按下文说明自行构建 |
 
 1. 前往 [本 fork 的 Release](https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy/releases) 页面下载并安装。应用会检查新版本，用户确认后下载安装包并启动安装程序。
 
 2. **Windows 系统**：
    - 推荐下载 `_x64-setup.exe` 安装包，支持应用内启动升级安装程序
-   - 也可选择免安装便携版：`SJTU.Canvas.Helper_3.0.16_x64_portable.zip`
+   - 也可选择免安装便携版：`SJTU.Canvas.Helper_3.0.17_x64_portable.zip`
 
 3. **MacOS 系统**：
    - 下载对应版本安装包 

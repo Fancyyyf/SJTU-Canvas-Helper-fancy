@@ -1,6 +1,6 @@
 import { CssBaseline, GlobalStyles } from "@mui/material";
 import { alpha, createTheme, ThemeProvider } from "@mui/material/styles";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import AppRouter from "./components/router";
 import "./css/global.css";
@@ -8,6 +8,7 @@ import { useConfigSelector } from "./lib/hooks";
 import { AppMessageProvider } from "./lib/message";
 import { UpdateNoticeProvider } from "./lib/update_notice";
 import { useAppZoom } from "./lib/app_zoom";
+import { syncCanvasCalendar } from "./lib/canvas_calendar_cache";
 
 const FONT_DISPLAY =
   '"Iowan Old Style", "Palatino Linotype", "Georgia", "STZhongsong", "SimSun", "Songti SC", serif';
@@ -16,6 +17,7 @@ const FONT_BODY =
 
 function App() {
   useAppZoom();
+  useEffect(() => { void syncCanvasCalendar(); }, []);
   const config = useConfigSelector((state) => state.config.data);
 
   const muiTheme = useMemo(() => {

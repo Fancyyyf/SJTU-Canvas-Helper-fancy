@@ -558,6 +558,10 @@ impl App {
         if let Some(cached_courses) = self.cache.get(COURSES_CACHE_KEY)? {
             return Ok(cached_courses);
         }
+        self.refresh_courses().await
+    }
+
+    pub async fn refresh_courses(&self) -> Result<Vec<Course>> {
         let courses = self
             .client
             .list_courses(&self.config.read().await.token)

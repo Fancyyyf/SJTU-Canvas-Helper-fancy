@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -16,7 +16,9 @@ afterEach(cleanup);
 
 it("keeps a pending reply through Agent → settings → Agent and restores a draft", async () => {
   let finish!: (value: string) => void;
-  mocks.invoke.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
+  mocks.invoke.mockImplementation((command: string) => command === "read_account_info"
+    ? Promise.resolve({ current_account: "Default" }) : command === "list_personal_events"
+    ? Promise.resolve([]) : new Promise<string>((resolve) => { finish = resolve; }));
   render(<MemoryRouter initialEntries={["/agent"]}>
     <Link to="/settings">设置</Link><Link to="/agent">返回 Agent</Link>
     <Routes><Route path="/agent" element={<CanvasAgentPage />} /><Route path="/settings" element={<div>设置内容</div>} /></Routes>
@@ -30,6 +32,7 @@ it("keeps a pending reply through Agent → settings → Agent and restores a dr
   expect(screen.getByText("本周作业")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   fireEvent.click(screen.getByRole("link", { name: "设置" }));
+  await waitFor(() => expect(typeof finish).toBe("function"));
   await act(async () => finish("周五提交报告"));
   fireEvent.click(screen.getByRole("link", { name: "返回 Agent" }));
   expect(screen.getByText("周五提交报告")).toBeInTheDocument();
@@ -37,5 +40,5 @@ it("keeps a pending reply through Agent → settings → Agent and restores a dr
   fireEvent.click(screen.getByRole("link", { name: "设置" }));
   fireEvent.click(screen.getByRole("link", { name: "返回 Agent" }));
   expect(input()).toHaveValue("草稿追问");
-  expect(mocks.invoke).toHaveBeenCalledOnce();
+  expect(mocks.invoke.mock.calls.filter(([command]) => command === "canvas_agent_chat")).toHaveLength(1);
 });

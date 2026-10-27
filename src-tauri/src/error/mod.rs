@@ -62,6 +62,8 @@ pub enum AppError {
     LLMError(String),
     #[error("Attendance error: {0}")]
     AttendanceError(String),
+    #[error("Calendar error: {0}")]
+    CalendarError(String),
 }
 
 impl AppError {
@@ -93,6 +95,7 @@ impl AppError {
             Self::DocxReaderError(_) => "FILE.DOCX_READ_FAILED",
             Self::LLMError(_) => "LLM.OPERATION_FAILED",
             Self::AttendanceError(_) => "ATTENDANCE.OPERATION_FAILED",
+            Self::CalendarError(_) => "CALENDAR.OPERATION_FAILED",
             Self::DocumentConversion(_) => "FILE.DOCUMENT_CONVERSION_FAILED",
             Self::FilePreview(_) => "FILE.PREVIEW_FAILED",
         }
@@ -115,6 +118,7 @@ impl AppError {
                 | Self::NotAllowedToCreateDefaultAccount
                 | Self::FunctionUnsupported
                 | Self::UnsupportedFileExtensionError(_)
+                | Self::CalendarError(_)
         )
     }
 

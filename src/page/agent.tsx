@@ -164,8 +164,8 @@ function ChatBubble(message: CanvasAgentChatMessage) {
 
 const SUGGESTIONS = [
   "帮我列出当前所有课程，并标出我可能最需要关注的几门。",
-  "作业最多的课程是哪个？",
   "检查最近 7 天内截止的作业，按时间顺序帮我整理。",
+  "帮我看看本周的日程和作业截止时间。",
 ];
 
 export default function CanvasAgentPage() {
@@ -218,7 +218,7 @@ export default function CanvasAgentPage() {
           chipLabel="智能助手"
           chipIcon={<AutoAwesomeRoundedIcon />}
           title="Canvas 智能聊天工作台"
-          description="在这里你可以直接用自然语言提问，让它帮你查看课程信息、整理作业待办、查找文件资料，并快速回答和 Canvas 学习相关的问题。"
+          description="用自然语言查看课程与作业，也可以查询、创建、修改或删除保存在本机的个人日程。"
           aside={
             <Stack spacing={1} alignItems={{ xs: "flex-start", md: "flex-end" }}>
               <Chip
@@ -227,7 +227,7 @@ export default function CanvasAgentPage() {
                 variant="outlined"
               />
               <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320 }}>
-                适合直接问“最近要交什么”“这门课文件在哪”“谁还没交作业”这类需要查 Canvas 数据的问题。
+                可以问“最近要交什么”“这门课文件在哪”，也可以说“帮我在周五下午三点安排一小时复习”。
               </Typography>
             </Stack>
           }
