@@ -1,4 +1,5 @@
 import { enqueuePDFMerge } from "./pdf_tasks";
+import type { DownloadCourse } from "./downloads";
 import { useTasks } from "./task_hooks";
 import { isTaskActive, taskManager } from "./task_manager";
 import {
@@ -274,10 +275,12 @@ export function useMerger({
   setPreviewEntry,
   onHoverEntry,
   onLeaveEntry,
+  course,
 }: {
   setPreviewEntry: Dispatch<SetStateAction<EntryType>>;
   onHoverEntry: (entry: Entry) => void;
   onLeaveEntry: () => void;
+  course?: DownloadCourse;
 }) {
   const tasks = useTasks();
   const latest = [...tasks].reverse().find((task) => task.kind === "pdf-merge");
@@ -296,7 +299,7 @@ export function useMerger({
       return;
     }
     const name = outFileName.trim().replace(/[\\/:*?"<>|]/g, "_") || `merged_${Date.now()}`;
-    enqueuePDFMerge(selected, `${name}.pdf`);
+    enqueuePDFMerge(selected, `${name}.pdf`, course);
   };
   const progress = (
     <Stack spacing={1}>
@@ -566,12 +569,7 @@ export function useData<T>(command: string, shouldFetch: boolean, args?: any) {
   };
 }
 
-export function useCourseSyllabus(courseId?: number) {
-  const [args, setArgs] = useState<any>({ courseId });
-  useEffect(() => { setArgs({ courseId }); }, [courseId]);
-  const shouldFetch = courseId != undefined && courseId > 0;
-  return useData<Course>("get_course_syllabus", shouldFetch, args);
-}
+export { useCourseSyllabus } from "./course_syllabus";
 
 export function useAllCourses() {
   const courses = useData<Course[]>("list_courses", true);
@@ -633,14 +631,13 @@ export function useCourses() {
 
 export function useTAOrTeacherCourses() {
   const courses = useCourses();
-  let data = courses.data;
-  data = data.filter((course) =>
+  const data = useMemo(() => courses.data.filter((course) =>
     course.enrollments.find(
       (enrollment) =>
         enrollment.role === "TaEnrollment" ||
         enrollment.role === "TeacherEnrollment"
     )
-  );
+  ), [courses.data]);
   return {
     ...courses,
     data,

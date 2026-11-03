@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 import json
 import re
 import sys
@@ -115,7 +115,7 @@ def update_website_htmls(version):
             f.write(content)
 
 def update_install_bat(version):
-    """Update version in scripts/install.bat"""
+    """Update version in script/install.bat"""
     bat_path = os.path.join(os.path.dirname(__file__), 'install.bat')
 
     with open(bat_path, 'r', encoding='utf-8') as f:
@@ -123,7 +123,7 @@ def update_install_bat(version):
 
     match = re.search(r'set "VERSION=(\d+\.\d+\.\d+)"', content)
     if not match:
-        print("Warning: Could not find version in scripts/install.bat")
+        print("Warning: Could not find version in script/install.bat")
         return
 
     old_version = match.group(1)
@@ -133,10 +133,10 @@ def update_install_bat(version):
     with open(bat_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"Updated scripts/install.bat: {old_version} -> {version}")
+    print(f"Updated script/install.bat: {old_version} -> {version}")
 
 def update_install_mac_sh(version):
-    """Update version in scripts/install_mac.sh"""
+    """Update version in script/install_mac.sh"""
     sh_path = os.path.join(os.path.dirname(__file__), 'install_mac.sh')
 
     with open(sh_path, 'r', encoding='utf-8') as f:
@@ -144,7 +144,7 @@ def update_install_mac_sh(version):
 
     match = re.search(r'VERSION="(\d+\.\d+\.\d+)"', content)
     if not match:
-        print("Warning: Could not find version in scripts/install_mac.sh")
+        print("Warning: Could not find version in script/install_mac.sh")
         return
 
     old_version = match.group(1)
@@ -153,7 +153,7 @@ def update_install_mac_sh(version):
     with open(sh_path, 'w', encoding='utf-8') as f:
         f.write(content)
 
-    print(f"Updated scripts/install_mac.sh: {old_version} -> {version}")
+    print(f"Updated script/install_mac.sh: {old_version} -> {version}")
 
 def update_readme(version):
     """Update version strings in README.md"""
@@ -163,7 +163,7 @@ def update_readme(version):
         content = f.read()
 
     # Find old version from the first download link
-    match = re.search(r'SJTU\.Canvas\.Helper_(\d+\.\d+\.\d+)_x64_en-US\.msi', content)
+    match = re.search(r'SJTU\.Canvas\.Helper_(\d+\.\d+\.\d+)_(?:x64-setup\.exe|x64_en-US\.msi)', content)
     if not match:
         print("Warning: Could not find current version in README.md")
         return

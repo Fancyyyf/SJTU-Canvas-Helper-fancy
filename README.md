@@ -10,8 +10,8 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 <div align="center">
   <img align="center" src="https://img.shields.io/badge/rust-1.75-blue" alt="">
-  <img align="center" src="https://img.shields.io/github/stars/Okabe-Rintarou-0/SJTU-Canvas-Helper" /> 
-  <img align="center" src="https://img.shields.io/github/v/release/Okabe-Rintarou-0/SJTU-Canvas-Helper?include_prereleases" /> 
+  <img align="center" src="https://img.shields.io/github/stars/Okabe-Rintarou-0/SJTU-Canvas-Helper" />
+  <img align="center" src="https://img.shields.io/github/v/release/Okabe-Rintarou-0/SJTU-Canvas-Helper?include_prereleases" />
   <img align="center" src="https://img.shields.io/github/downloads/Okabe-Rintarou-0/SJTU-Canvas-Helper/total" />
 </div>
 
@@ -30,24 +30,24 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
    - 也可选择免安装便携版：`SJTU.Canvas.Helper_3.0.17_x64_portable.zip`
 
 3. **MacOS 系统**：
-   - 下载对应版本安装包 
-   - 或打开终端（terminal）运行 `bash scripts/install_mac.sh` 自动下载安装（自动识别 Intel / Apple Silicon 芯片）
+   - 当前 fork 暂无自动构建的 macOS 安装包；如需使用原项目版本，可从 [upstream Release](https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/releases) 下载。
+   - `bash script/install_mac.sh` 也会安装 upstream 版本，自动识别 Intel / Apple Silicon 芯片；该脚本不会安装本 fork 的功能。
    - 若遇到打不开的问题，可参考 [在 Mac 上安全地打开 App](https://support.apple.com/zh-cn/102445)
    - 若显示已损坏，尝试执行以下命令：
      ```shell
-     cd /Applications 
+     cd /Applications
      sudo xattr -r -d com.apple.quarantine /Applications/SJTU\ Canvas\ Helper.app
      ```
 
 4. **Arch Linux 系统**：
    通过 [yay](https://github.com/Jguer/yay) 从 AUR 安装：
    ```bash
-   yay -S sjtu-canvas-helper
+   yay -S sjtu-canvas-helpe
    ```
 
 ### 首次配置
 
-安装完成后，请前往设置页面填写您的 `Canvas Token` 以及文件下载保存目录。
+安装完成后，请前往“系统设置 → 账号与连接”填写 `Canvas Token` 和文件下载保存目录。可在同一分类查看 Token 获取指引、测试连接，并按需完成视频功能的额外登录；修改后点击“保存全部设置”。
 
 “字幕工作台”位于左侧边栏。原始字幕可以直接阅读、检索和复制；页面会将资料整理到设置中的下载目录：`字幕工作台/<课程>/01_原始JSON` 保存未改动的接口 JSON，`02_提取TXT` 保存提取的字幕，`03_Agent整理/01_字幕清理` 和 `03_Agent整理/02_知识点整理` 保存两种 Agent 结果。点击“打开 Agent 小窗口”可对当前课次或整门课逐节处理。字幕清理会按标点和长度切块，删除无意义口头语并保留原意；知识点整理可选择原始 TXT 或已清理的字幕，后者未生成时不可选。每块都独立调用与 Canvas Agent 相同配置的模型接口，代码负责逐课循环、拼接结果。两个模式的提示词可在窗口编辑，也可直接修改 `字幕工作台/prompts` 下的 Markdown 文件。抓取新课程时，先在设置页完成额外登录，再在工作台加载视频课程、选择课程并输入文件名前缀；系统会拉取该课程所有已上过的课次，抓取中断后使用同一前缀可继续。
 
@@ -82,12 +82,15 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 ## Main Features
 + [x] 文件下载 / 预览(免下载) / PDF & PPTX 混合合并(免下载)
 + [x] 一键上传[交大云盘（新）](https://pan.sjtu.edu.cn/)
-+ [x] DDL 日历 
++ [x] DDL 日历
 + [x] 人员名单导出
 + [x] 查看/提交作业
 + [x] 批改作业/修改作业 DDL
 + [x] 支持密院和本部 canvas 系统
 + [x] 视频下载/播放/字幕下载/截图抓取合成PDF
++ [x] 课堂视频转写、字幕 AI 精校、主题整理和可回溯的字幕版本；支持直播连续播放和画中画
++ [x] 应用数据备份、迁移、分类清理，以及按课程管理本地下载文件
++ [x] 脱敏诊断报告与本地错误日志查看，反馈时可自行决定是否附上报告
 + [x] 字幕工作台：浏览、搜索、导出原始字幕资料，并批量抓取视频空间课程字幕
 + [x] 签到守望：自动识别屏幕中的课堂签到二维码，支持扫码登录态与账号密码/OCR 回退登录
 + [x] 多 API Key 管理：支持添加多个 LLM 服务商 Key，自动识别提供商并拉取可用模型列表
@@ -151,7 +154,7 @@ https://github.com/Okabe-Rintarou-0/SJTU-Canvas-Helper/assets/58595459/7f05cabc-
 
 “签到守望”用于在本人正常参与课堂时，辅助发现 Canvas 直播、共享屏幕或课件中短暂出现的课堂签到二维码。它会在本机定时捕获所有显示器，识别二维码，并且只对以下格式的上海交通大学课堂签到链接执行操作：
 
-```text
+```tex
 https://mlearning.sjtu.edu.cn/lms/mobile2/forscan/...
 ```
 
@@ -179,7 +182,7 @@ https://mlearning.sjtu.edu.cn/lms/mobile2/forscan/...
 
 #### 登录与签到流程
 
-```text
+```tex
 Tauri 页面 → 启动 python/attendance/nn.py → 截屏与 QR 识别
                                             ↓
                                   调用 surveil.auto_sign
@@ -190,7 +193,7 @@ Tauri 页面 → 启动 python/attendance/nn.py → 截屏与 QR 识别
 
 签到实现直接沿用 Python 模块的原始文件层级，并只为桌面集成增加了配置、命令行入口和 JSON Lines 事件：
 
-```text
+```tex
 python/attendance/
 ├── nn.py              # 截屏、QR 识别、循环监听、提示音
 ├── surveil.py         # 登录、验证码 OCR、token 获取、签到提交
@@ -207,7 +210,7 @@ Rust/Tauri 只负责查找解释器、启动或停止 Python 子进程、传入�
 应用会附带上述 Python 源文件，但不会内置 Python 解释器和第三方包。先安装 Python 3，再在项目根目录执行：
 
 ```shell
-python -m pip install -r python/attendance/requirements.txt
+python -m pip install -r python/attendance/requirements.tx
 ```
 
 进入“签到守望”页面后，可填写 `python`、`python3` 或解释器完整路径，点击“检测 Python 环境”，检测成功后保存配置。若仅使用模块，可参考 [python/attendance/README.md](python/attendance/README.md) 中的独立运行命令。
@@ -262,7 +265,7 @@ Python 模块以用户提供的 `canvas_video_check_in_fancy` 本地版本为基
 
 ### 2. 项目结构
 
-```text
+```tex
 SJTU-Canvas-Helper-fancy/
 ├── src/                              # React/TypeScript 前端
 │   ├── page/                         # 路由页面，每个主要功能一个页面
@@ -275,7 +278,7 @@ SJTU-Canvas-Helper-fancy/
 │   ├── src/app/                      # 应用编排、缓存、视频、签到等业务层
 │   ├── src/client/                   # Canvas、视频、JBox、LLM HTTP 客户端
 │   ├── src/model/                    # Rust DTO、配置和事件模型
-│   ├── src/mcp/                      # 本机 MCP Server
+│   ├── src/mcp/                      # 本机 MCP Serve
 │   ├── src/utils/                    # 文件、时间和 JSON 工具
 │   ├── capabilities/                 # Tauri 权限声明
 │   ├── icons/                        # 各平台应用图标
@@ -294,7 +297,7 @@ SJTU-Canvas-Helper-fancy/
 ├── images/                           # README 使用的截图和说明图片
 ├── docs/maintenance/                 # 合并、功能核对与发布记录
 ├── website/                          # 项目介绍静态站点
-├── scripts/                          # 安装、版本同步和本地 Release 构建脚本
+├── script/                          # 安装、版本同步和本地 Release 构建脚本
 ├── .github/workflows/                # 检查、测试、网站和发布流水线
 ├── package.json                      # 前端脚本与依赖
 └── README.md
@@ -304,7 +307,7 @@ SJTU-Canvas-Helper-fancy/
 
 主要调用链如下：
 
-```text
+```tex
 React 页面
    │ invoke("command", payload)
    ▼
@@ -353,7 +356,7 @@ Tauri 的最新系统依赖列表以[官方 Prerequisites](https://v2.tauri.app/
 
 ```bash
 xcode-select --install
-brew install node python zbar
+brew install node python zba
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
@@ -363,10 +366,10 @@ Apple Silicon 默认目标是 `aarch64-apple-darwin`，Intel Mac 默认目标是
 
 ```bash
 sudo apt update
-sudo apt install -y \
-  build-essential curl wget file libssl-dev \
-  libwebkit2gtk-4.1-dev libgtk-3-dev \
-  libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf \
+sudo apt install -y
+  build-essential curl wget file libssl-dev
+  libwebkit2gtk-4.1-dev libgtk-3-dev
+  libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf
   python3 python3-venv libzbar0
 ```
 
@@ -375,7 +378,7 @@ Fedora、Arch、openSUSE 等发行版的软件包名称不同，请按 Tauri 官
 ### 4. 克隆与首次编译
 
 ```shell
-git clone https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy.git
+git clone https://github.com/Fancyyyf/SJTU-Canvas-Helper-fancy.gi
 cd SJTU-Canvas-Helper-fancy
 
 # 严格使用 yarn.lock 安装前端依赖
@@ -393,7 +396,7 @@ Windows PowerShell：
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r python\attendance\requirements.txt
+python -m pip install -r python\attendance\requirements.tx
 ```
 
 macOS/Linux：
@@ -402,7 +405,7 @@ macOS/Linux：
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r python/attendance/requirements.txt
+python -m pip install -r python/attendance/requirements.tx
 ```
 
 首次启动完整桌面应用：
@@ -479,9 +482,9 @@ yarn tauri info
 提交前建议依次运行：
 
 ```shell
-yarn lint
+yarn lin
 yarn typecheck
-yarn test
+yarn tes
 yarn build
 
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
@@ -530,7 +533,7 @@ cargo test --manifest-path src-tauri/Cargo.toml client::video::tests::test_get_u
 
 #### 全局日志与错误处理约定
 
-项目使用统一的结构化诊断事件，而不是在业务代码中直接调用 `console.log` 或拼接任意字符串。前端入口为 `src/lib/logger.ts`，Rust 入口为 `src-tauri/src/diagnostics.rs`；Tauri Command 返回的 `AppError` 会在序列化给前端前自动记录错误码、可恢复性和脱敏后的技术详情。
+项目使用统一的结构化诊断事件。前端入口为 `src/lib/logger.ts`，Tauri 转发入口为 `src-tauri/src/local_error_log.rs`，脱敏与诊断报告入口为 `src-tauri/src/diagnostics.rs`；Tauri Command 返回的 `AppError` 会在序列化给前端前自动记录错误码、可恢复性和脱敏后的技术详情。
 
 一条前端诊断事件包含以下稳定字段：
 
@@ -575,7 +578,7 @@ logHandledError({
 
 Rust 侧使用带字段的 `tracing` 事件，例如：
 
-```rust
+```rus
 tracing::warn!(
     code = "VIDEO.PROXY_RESTARTED",
     %trace_id,
@@ -594,13 +597,13 @@ tracing::warn!(
 
 开发构建保存 `DEBUG` 及以上级别，并在 WebView Console 输出结构化对象；Release 构建只保存 `WARN` 和 `ERROR`，前端不会附带详细 `context` 和堆栈。无论构建类型，密钥字段、敏感请求头、URL 查询凭据和 JSON 中的敏感键都会被替换为 `<redacted>`。HTTP 调试页只有在设置中显式开启调试模式后才收集请求，最多保留最近 1000 条，每个请求/响应正文预览最多 1 MiB。
 
-`app.log` 达到 8 MiB 后会在下一次启动时轮换为 `app.previous.log`，仅保留一份旧日志；应用内日志查看器最多读取当前日志最后 4 MiB。如果文件日志初始化失败，应用会降级到控制台日志并继续启动。排查问题时优先按 `eventId`、`traceId` 或 `code` 搜索，不要要求用户公开整个配置目录。
+新的结构化事件写入本机 `diagnostics.log`，并可在应用内查看脱敏诊断报告；旧版本的 `app.log` 继续作为历史本地错误日志供用户单独查看，不会自动附进反馈报告。用户可自行保存并附上诊断报告。如果文件日志初始化失败，应用会继续启动。排查问题时优先按 `eventId`、`traceId` 或 `code` 搜索，不要要求用户公开整个配置目录。
 
 提交涉及错误处理的代码前，至少运行：
 
 ```powershell
-yarn lint
-yarn test
+yarn lin
+yarn tes
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml diagnostics::tests
 ```
@@ -609,13 +612,13 @@ cargo test --manifest-path src-tauri/Cargo.toml diagnostics::tests
 
 每次点击课程视频都会生成一个随机 `traceId`。前端、Tauri 命令、本地媒体代理和源站请求均使用该 ID 记录同一条播放链路，因此排查时不需要反复重启应用。正常链路依次包含：
 
-```text
+```tex
 play.requested
-→ play.proxy_url_built
-→ proxy.prepare.begin / proxy.prepare.result
+→ play.proxy_url_buil
+→ proxy.prepare.begin / proxy.prepare.resul
 → probe.begin
 → Video proxy CORS preflight（仅 WebView 要求预检时出现）
-→ Video proxy inbound request
+→ Video proxy inbound reques
 → Video proxy upstream response
 → probe.success
 → player.load_start / player.metadata_loaded / player.can_play / player.playing
@@ -625,7 +628,7 @@ play.requested
 
 Windows 默认日志路径为：
 
-```text
+```tex
 %APPDATA%\SJTU-Canvas-Helper\app.log
 ```
 
@@ -665,8 +668,8 @@ Tauri 官方建议通过 CLI 的 `build` 命令生成本机安装包，详见[�
 ```powershell
 cd H:\Daily_project_vault\SJTU-Canvas-Helper-fancy
 
-yarn.cmd lint
-yarn.cmd test
+yarn.cmd lin
+yarn.cmd tes
 yarn.cmd typecheck
 cargo check --manifest-path src-tauri\Cargo.toml
 cargo test --manifest-path src-tauri\Cargo.toml
@@ -707,8 +710,8 @@ cargo fetch --manifest-path src-tauri/Cargo.toml --locked
 ##### 发布检查的含义
 
 ```powershell
-yarn.cmd lint
-yarn.cmd test
+yarn.cmd lin
+yarn.cmd tes
 yarn.cmd typecheck
 
 cargo check --manifest-path src-tauri/Cargo.toml
@@ -753,9 +756,10 @@ yarn.cmd tauri build `
 
 安装包输出到：
 
-```text
-src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
-src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\
+```tex
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi
+src-tauri\target\x86_64-pc-windows-msvc\release\bundle
+sis
 ```
 
 只需要 release 可执行文件、不需要安装包时：
@@ -766,7 +770,7 @@ yarn.cmd tauri build --config src-tauri/tauri.local.conf.json --no-bundle --targ
 
 `--no-bundle` 表示只生成 release 可执行文件，不生成 MSI 或 NSIS 安装包。可执行文件通常位于：
 
-```text
+```tex
 src-tauri\target\x86_64-pc-windows-msvc\release\SJTU Canvas Helper.exe
 ```
 
@@ -841,7 +845,7 @@ yarn tauri build --config src-tauri/tauri.local.conf.json --target i686-pc-windo
 
 典型输出：
 
-```text
+```tex
 src-tauri/target/<target>/release/bundle/msi/*.msi
 src-tauri/target/<target>/release/bundle/nsis/*-setup.exe
 ```
@@ -866,7 +870,7 @@ yarn tauri build --config src-tauri/tauri.local.conf.json --target x86_64-apple-
 
 典型输出：
 
-```text
+```tex
 src-tauri/target/<target>/release/bundle/macos/*.app
 src-tauri/target/<target>/release/bundle/dmg/*.dmg
 ```
@@ -885,7 +889,7 @@ yarn tauri build --config src-tauri/tauri.local.conf.json --bundles deb,rpm,appi
 
 典型输出：
 
-```text
+```tex
 src-tauri/target/release/bundle/deb/*.deb
 src-tauri/target/release/bundle/rpm/*.rpm
 src-tauri/target/release/bundle/appimage/*.AppImage
@@ -904,13 +908,13 @@ src-tauri/target/release/bundle/appimage/*.AppImage
 - `src-tauri/tauri.conf.json`
 - `README.md` 下载链接
 - `website/` 页面
-- `scripts/install.bat`
-- `scripts/install_mac.sh`
+- `script/install.bat`
+- `script/install_mac.sh`
 
 使用同步脚本更新：
 
 ```shell
-python scripts/bump_version.py 3.1.0
+python script/bump_version.py 3.1.0
 
 # 安装了 GNU Make 时也可以使用
 make version 3.1.0

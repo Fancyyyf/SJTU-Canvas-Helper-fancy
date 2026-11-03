@@ -9,11 +9,15 @@ use crate::{
 pub mod annual;
 pub mod attendance;
 pub mod basic;
+pub mod data;
+pub mod downloads;
+mod qrcode;
 pub mod cache;
 mod constants;
 pub mod jbox;
 pub mod video;
 pub mod video_library;
+mod video_artifacts;
 pub(crate) mod ppt;
 #[cfg(test)]
 mod ppt_audit;

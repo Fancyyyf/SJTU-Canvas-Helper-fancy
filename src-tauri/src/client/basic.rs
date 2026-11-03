@@ -1,5 +1,4 @@
 use super::{constants::BASE_URL, file_parser, llm, Client};
-use ::bytes::Bytes;
 use reqwest::{cookie, multipart};
 use serde::de::DeserializeOwned;
 use std::{cmp::min, collections::HashSet, fs, io::Write, ops::Deref, path::Path, sync::Arc};
@@ -54,6 +53,9 @@ impl Client {
             jar,
             base_url,
             token,
+            video_auth: Default::default(),
+            transcription: Default::default(),
+            subtitle_proofread: Default::default(),
             llm_cli,
             file_parser,
             debug_store: super::debug::NetworkDebugStore::new(false),
@@ -97,6 +99,9 @@ impl Client {
             jar,
             base_url,
             token,
+            video_auth: Default::default(),
+            transcription: Default::default(),
+            subtitle_proofread: Default::default(),
             llm_cli,
             file_parser,
             debug_store: super::debug::NetworkDebugStore::new(false),
@@ -329,16 +334,6 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_file_content(file: &File) -> Result<Bytes> {
-        let response = reqwest::Client::new()
-            .get(&file.url)
-            .send()
-            .await?
-            .error_for_status()?;
-        let bytes = response.bytes().await?;
-        Ok(bytes)
-    }
-
     pub async fn download_file<F: Fn(ProgressPayload) + Send>(
         &self,
         file: &File,
@@ -536,13 +531,6 @@ impl Client {
         Ok(FoldersAndFiles::new(folders, files))
     }
 
-    pub fn get_course_identifier(&self, course: &Course) -> String {
-        format!(
-            "{}({} {})",
-            course.name, course.term.name, course.teachers[0].display_name
-        )
-    }
-
     pub async fn sync_course_files(
         &self,
         course: &Course,
@@ -564,12 +552,14 @@ impl Client {
                             return false;
                         }
 
-                        let mut path = Path::new(save_dir).join(self.get_course_identifier(course));
+                        let mut relative = std::path::PathBuf::new();
                         if folder_name != "course files" {
-                            path = path.join(&folder_name[13..]);
+                            let Some(remote) = folder_name.strip_prefix("course files/") else { return true; };
+                            let Ok(folder) = crate::utils::download::relative_path(remote) else { return true; };
+                            relative = folder;
                         }
-                        path = path.join(&file.display_name);
-                        fs::metadata(&path).is_err()
+                        crate::utils::download::course_file_path(Path::new(save_dir), course, &relative.to_string_lossy(), &file.display_name)
+                            .map(|path| !path.is_file()).unwrap_or(true)
                     }
                     None => true,
                 }
@@ -787,6 +777,19 @@ impl Client {
         let url = format!("{}/api/v1/users/self", self.base_url.read().await);
         let me = self.get_json_with_token(&url, None::<&str>, token).await?;
         Ok(me)
+    }
+
+    pub async fn test_credential(&self, token: &str) -> Result<User> {
+        // Use the same URL for dispatch and diagnostics if settings change during the request.
+        let url = format!("{}/api/v1/users/self", self.base_url.read().await);
+        let result = self.get_json_with_token(&url, None::<&str>, token).await;
+        tracing::info!(
+            operation = "credential_test",
+            endpoint = %crate::diagnostics::sanitize_url(&url),
+            success = result.is_ok(),
+            "Credential test completed"
+        );
+        result
     }
 
     async fn upload_submission_file_with(
@@ -1029,6 +1032,43 @@ mod mock_tests {
     }
 
     #[tokio::test]
+    async fn test_credential_uses_current_endpoint_and_preserves_http_errors() {
+        let first = MockServer::start();
+        let second = MockServer::start();
+        let user = crate::model::User {
+            id: 7,
+            ..Default::default()
+        };
+        let accepted = first.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/users/self")
+                .header("Authorization", "Bearer supplied-credential");
+            then.status(200)
+                .json_body(serde_json::to_value(&user).unwrap());
+        });
+        let rejected = second.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/users/self")
+                .header("Authorization", "Bearer supplied-credential");
+            then.status(401);
+        });
+        let client = create_test_client(&first.base_url());
+        assert_eq!(
+            client.test_credential("supplied-credential").await.unwrap().id,
+            7
+        );
+        client.set_base_url(second.base_url()).await;
+        let error = client
+            .test_credential("supplied-credential")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, crate::error::AppError::Network(error)
+            if error.status() == Some(reqwest::StatusCode::UNAUTHORIZED)));
+        accepted.assert();
+        rejected.assert();
+    }
+
+    #[tokio::test]
     async fn test_get_file_preview_session_url_creates_web_session() {
         let server = MockServer::start();
         let token = "test_token_12345";
@@ -1255,6 +1295,30 @@ mod mock_tests {
         assert_eq!(course.teachers[0].display_name, "Dr. Einstein");
 
         mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_get_course_syllabus_without_published_body() {
+        for body in [
+            json!({"id": 42, "syllabus_body": null}),
+            json!({"id": 42}),
+            json!({"id": 42, "syllabus_body": ""}),
+        ] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/courses/42")
+                    .query_param("include[]", "syllabus_body");
+                then.status(200).json_body(body.clone());
+            });
+            let course = create_test_client(&server.base_url())
+                .get_course_syllabus(42, "test-token")
+                .await
+                .unwrap();
+            assert_eq!(course.id, 42);
+            assert!(course.syllabus_body.is_empty());
+            mock.assert();
+        }
     }
 
     #[tokio::test]

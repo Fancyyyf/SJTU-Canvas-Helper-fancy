@@ -17,8 +17,9 @@ use std::{
 };
 use tauri::{Emitter, Runtime, Window};
 use tokio::{io::AsyncReadExt, process::Command as TokioCommand};
-use tokio::{sync::RwLock, task::JoinSet};
+use tokio::sync::RwLock;
 use uuid::Uuid;
+use crate::utils::download as outputs;
 use warp::filters::query::raw as query_raw;
 use warp::{hyper::Response, Filter};
 
@@ -29,7 +30,7 @@ use crate::{
     },
     error,
     model::*,
-    utils::{self, file::TempFile},
+    utils,
 };
 
 use super::{
@@ -156,13 +157,12 @@ async fn proxy_video_request(
 impl App {
     fn ensure_directory(dir: &str) {
         let metadata = fs::metadata(dir);
-        tracing::info!("dir: {:?}", dir);
         if metadata.is_err() {
             _ = fs::create_dir_all(dir);
         }
     }
 
-    fn portable() -> bool {
+    pub(crate) fn portable() -> bool {
         let exe_dir = std::env::current_exe()
             .map(|path| path.parent().unwrap().to_owned())
             .ok();
@@ -180,17 +180,16 @@ impl App {
         if let Ok(path) = std::env::var("SJTU_CANVAS_TEST_CONFIG_DIR") {
             return Ok(path);
         }
-        if App::portable() {
-            let exe_dir = std::env::current_exe()
-                .map(|path| path.parent().unwrap().to_owned())
-                .ok()
-                .unwrap();
-            let config_dir = exe_dir.join(".config");
-            Ok(config_dir.to_str().unwrap().to_owned())
+        let directory = if App::portable() {
+            std::env::current_exe()?
+                .parent()
+                .ok_or_else(|| std::io::Error::other("Application directory unavailable"))?
+                .join(".config")
         } else {
-            let config_dir = config_dir().unwrap().join("SJTU-Canvas-Helper");
-            Ok(config_dir.to_str().unwrap().to_owned())
-        }
+            config_dir().ok_or_else(|| std::io::Error::other("Configuration directory unavailable"))?
+                .join("SJTU-Canvas-Helper")
+        };
+        Ok(directory.to_str().ok_or_else(|| std::io::Error::other("Configuration path is not valid UTF-8"))?.to_owned())
     }
 
     fn save_account_info(account: &AccountInfo) -> Result<()> {
@@ -276,8 +275,10 @@ impl App {
         }
         let config_path = App::get_config_path(account);
         let config = App::read_config_from_file(&config_path)?;
+        crate::diagnostics::protect_config(&config);
         let base_url = Self::get_base_url(&config.account_type);
         self.client.set_base_url(base_url).await;
+        self.client.configure_video_auth(&config.token, &config.ja_auth_cookie, true).await;
         Self::apply_llm_config(&config, &self.client).await?;
         self.client.set_debug_mode(config.debug_mode);
         *self.config.write().await = config;
@@ -313,10 +314,14 @@ impl App {
                 account
             }
         };
-        tracing::info!("Read current account: {:?}", account_info);
+        tracing::info!("Loaded current account configuration");
         let config_path = App::get_config_path(&account_info.current_account);
         tracing::info!("Read config path: {}", config_path);
-        let config = App::read_config_from_file(&config_path).unwrap_or_default();
+        let config = App::read_config_from_file(&config_path).unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "Could not read configuration; using defaults");
+            AppConfig::default()
+        });
+        crate::diagnostics::protect_config(&config);
         if account_info.current_account == Account::Default && !Path::new(&config_path).exists() {
             if let Err(error) = fs::write(&config_path, serde_json::to_vec(&config).unwrap()) {
                 tracing::warn!("Could not initialize default account config: {error}");
@@ -359,9 +364,10 @@ impl App {
 
     pub async fn init(&self) -> Result<()> {
         let mut config = self.get_config().await;
+        self.client.configure_video_auth(&config.token, &config.ja_auth_cookie, false).await;
         let cookies = &config.video_cookies;
         if !cookies.is_empty() {
-            tracing::info!("Detected saved cookies: {}", cookies);
+            tracing::info!("Restoring saved video login");
             self.client.init_cookie(cookies);
             if let Ok(Some(consumer_key)) = self.client.get_oauth_consumer_key().await {
                 config.oauth_consumer_key = consumer_key;
@@ -484,7 +490,12 @@ impl App {
             .or(canvas_stream_proxy)
             .or(ready_check);
         let (_, server) = warp::serve(routes).try_bind_ephemeral(([127, 0, 0, 1], proxy_port))
-            .map_err(|_| AppError::VideoDownloadError(format!("播放代理端口 {proxy_port} 无法使用，请检查端口是否被占用")))?;
+            .map_err(|error| {
+                tracing::warn!(proxy_port, error = ?error, "Could not bind playback proxy");
+                AppError::VideoDownloadError(format!(
+                    "播放代理无法绑定 127.0.0.1:{proxy_port}：{error}。端口可能被其他程序绑定（包括未监听的连接），或被系统限制；请前往「设置 → 高级与实验 → 播放代理端口」更换端口，保存后返回重试"
+                ))
+            })?;
         *proxy_handle = Some(tokio::spawn(server));
         let ready = self.wait_proxy_ready(proxy_port).await;
         if !matches!(ready, Ok(true)) {
@@ -545,6 +556,23 @@ impl App {
 
     pub async fn get_config(&self) -> AppConfig {
         self.config.read().await.clone()
+    }
+
+    async fn update_runtime_config(&self, config: AppConfig) -> AppConfig {
+        // Use the same lock order as startup so it cannot reuse a listener on the old port.
+        let mut proxy_handle = self.handle.write().await;
+        let mut current = self.config.write().await;
+        let port_changed = current.proxy_port != config.proxy_port;
+        let previous = std::mem::replace(&mut *current, config);
+        drop(current);
+        if port_changed {
+            if let Some(handle) = proxy_handle.take() {
+                handle.abort();
+                // Release the socket before a player retries on the new port.
+                let _ = handle.await;
+            }
+        }
+        previous
     }
 
     pub async fn get_raw_config(&self) -> Result<String> {
@@ -747,7 +775,7 @@ impl App {
     }
 
     pub async fn test_token(&self, token: &str) -> Result<User> {
-        self.client.get_me(token).await
+        self.client.test_credential(token).await
     }
 
     pub async fn get_me(&self) -> Result<User> {
@@ -785,62 +813,6 @@ impl App {
     pub async fn list_course_images(&self, course_id: i64) -> Result<Vec<File>> {
         let token = self.config.read().await.token.clone();
         self.client.list_course_images(course_id, &token).await
-    }
-
-    async fn filter_course_qrcode_images_inner(
-        file: File,
-        save_dir: String,
-    ) -> Result<QRCodeScanResult> {
-        let mut scan_result = QRCodeScanResult {
-            file: file.clone(),
-            contents: vec![],
-        };
-        let supported_formats = ["jpg", "jpeg", "png"];
-        let ext = file.display_name.split('.').next_back().unwrap_or_default();
-        if !supported_formats.contains(&ext) {
-            return Ok(scan_result);
-        }
-        let content = Client::get_file_content(&file).await?;
-        let mut tmp_file = TempFile::with_extension(&save_dir, ext)?;
-        tmp_file.write_all(&content)?;
-
-        let tmp_path = tmp_file.path();
-        let img = image::open(tmp_path)?;
-        let decoder = bardecoder::default_decoder();
-
-        let results = decoder.decode(&img);
-        for content in results.into_iter().flatten() {
-            scan_result.contents.push(content);
-        }
-        Ok(scan_result)
-    }
-
-    pub async fn filter_course_qrcode_images(
-        &self,
-        course_id: i64,
-    ) -> Result<Vec<QRCodeScanResult>> {
-        let images = self.list_course_images(course_id).await?;
-        let mut tasks = JoinSet::new();
-        let mut results = vec![];
-        let save_dir = self.config.read().await.save_path.clone();
-        for image in images.into_iter() {
-            tasks.spawn(Self::filter_course_qrcode_images_inner(
-                image,
-                save_dir.clone(),
-            ));
-        }
-        while let Some(res) = tasks.join_next().await {
-            let result = res?;
-            match result {
-                Ok(scan_result) => {
-                    if !scan_result.contents.is_empty() {
-                        results.push(scan_result);
-                    }
-                }
-                Err(err) => tracing::error!("{:?}", err),
-            }
-        }
-        Ok(results)
     }
 
     pub async fn list_course_users(&self, course_id: i64) -> Result<Vec<User>> {
@@ -901,29 +873,35 @@ impl App {
             .await
     }
 
-    pub async fn save_file_content(&self, content: &[u8], file_name: &str) -> Result<()> {
+    pub async fn save_file_content(&self, content: &[u8], file_name: &str, course: Option<&outputs::DownloadCourse>) -> Result<()> {
+        let output = self.download_output().await?;
         let save_dir = self.config.read().await.save_path.clone();
-        let path = Path::new(&save_dir).join(file_name);
+        let path = outputs::directory(Path::new(&save_dir), "attachment", course)?.join(outputs::safe_name(file_name));
         // create file if path not exists, else open it in append mode
         let mut file = match fs::metadata(&path) {
             Ok(_) => fs::OpenOptions::new().append(true).open(&path)?,
             Err(_) => fs::File::create(&path)?,
         };
         file.write_all(content)?;
+        drop(file);
+        output.register(&path).await?;
         Ok(())
     }
 
     pub async fn download_file<F: Fn(ProgressPayload) + Send>(
         &self,
         file: &File,
+        course: Option<&outputs::DownloadCourse>,
         progress_handler: F,
     ) -> Result<()> {
+        let output = self.download_output().await?;
         let guard = self.config.read().await;
         let token = &guard.token.clone();
-        let save_path = &guard.save_path.clone();
+        let save_path = outputs::directory(Path::new(&guard.save_path), "attachment", course)?;
         self.client
-            .download_file(file, token, save_path, progress_handler)
+            .download_file(file, token, &outputs::display_path(&save_path), progress_handler)
             .await?;
+        output.register(&save_path.join(outputs::safe_name(&file.display_name))).await?;
         Ok(())
     }
 
@@ -934,18 +912,18 @@ impl App {
         folder_path: &str,
         progress_handler: F,
     ) -> Result<()> {
+        let output = self.download_output().await?;
         let guard = self.config.read().await;
         let token = &guard.token.clone();
-        let course_identifier = self.get_course_identifier(course);
-        let save_path = Path::new(&guard.save_path)
-            .join(course_identifier)
-            .join(folder_path);
+        let save_path = outputs::directory(Path::new(&guard.save_path), "file", Some(&course.into()))?
+            .join(outputs::relative_path(folder_path)?);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::info!("Download file at path: {:?}", save_path);
+        tracing::info!("Starting course file download");
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
+        output.register(&Path::new(save_path).join(outputs::safe_name(&file.display_name))).await?;
         Ok(())
     }
 
@@ -955,17 +933,19 @@ impl App {
         folder_path: &str,
         progress_handler: F,
     ) -> Result<()> {
+        let output = self.download_output().await?;
         let guard = self.config.read().await;
         let token = &guard.token.clone();
         let save_path = Path::new(&guard.save_path)
             .join(MY_CANVAS_FILES_FOLDER_NAME)
-            .join(folder_path);
+            .join(outputs::relative_path(folder_path)?);
         let save_path = save_path.to_str().unwrap_or_default();
         App::ensure_directory(save_path);
-        tracing::info!("Download file at path: {:?}", save_path);
+        tracing::info!("Starting personal file download");
         self.client
             .download_file(file, token, save_path, progress_handler)
             .await?;
+        output.register(&Path::new(save_path).join(outputs::safe_name(&file.display_name))).await?;
         Ok(())
     }
 
@@ -975,27 +955,28 @@ impl App {
         course: &Course,
         folder_path: &str,
     ) -> Result<()> {
+        let output = self.download_output().await?;
         let (pdf_name, pdf_content) = self.convert_office_file_to_pdf(file).await?;
-        let save_path = Path::new(&self.config.read().await.save_path)
-            .join(self.get_course_identifier(course))
-            .join(folder_path);
+        let save_path = outputs::directory(Path::new(&self.config.read().await.save_path), "file", Some(&course.into()))?
+            .join(outputs::relative_path(folder_path)?);
         fs::create_dir_all(&save_path)?;
-        fs::write(save_path.join(pdf_name), pdf_content)?;
+        let path = save_path.join(outputs::safe_name(&pdf_name));
+        fs::write(&path, pdf_content)?;
+        output.register(&path).await?;
         Ok(())
     }
 
     pub async fn download_my_file_as_pdf(&self, file: &File, folder_path: &str) -> Result<()> {
+        let output = self.download_output().await?;
         let (pdf_name, pdf_content) = self.convert_office_file_to_pdf(file).await?;
         let save_path = Path::new(&self.config.read().await.save_path)
             .join(MY_CANVAS_FILES_FOLDER_NAME)
-            .join(folder_path);
+            .join(outputs::relative_path(folder_path)?);
         fs::create_dir_all(&save_path)?;
-        fs::write(save_path.join(pdf_name), pdf_content)?;
+        let path = save_path.join(outputs::safe_name(&pdf_name));
+        fs::write(&path, pdf_content)?;
+        output.register(&path).await?;
         Ok(())
-    }
-
-    fn get_course_identifier(&self, course: &Course) -> String {
-        self.client.get_course_identifier(course)
     }
 
     pub async fn sync_course_files(&self, course: &Course) -> Result<Vec<File>> {
@@ -1007,9 +988,9 @@ impl App {
             .await
     }
 
-    pub async fn open_file(&self, name: &str) -> Result<()> {
+    pub async fn open_file(&self, name: &str, kind: &str, course: Option<&outputs::DownloadCourse>) -> Result<()> {
         let save_path = &self.config.read().await.save_path;
-        let path = Path::new(save_path).join(name);
+        let path = outputs::existing_file(Path::new(save_path), name, kind, course);
         self.open_path(path.to_str().unwrap_or_default())
     }
 
@@ -1020,10 +1001,7 @@ impl App {
         folder_path: &str,
     ) -> Result<()> {
         let save_path = &self.config.read().await.save_path;
-        let path = Path::new(save_path)
-            .join(self.get_course_identifier(course))
-            .join(folder_path)
-            .join(name);
+        let path = outputs::course_file_path(Path::new(save_path), course, folder_path, name)?;
         self.open_path(path.to_str().unwrap_or_default())
     }
 
@@ -1031,8 +1009,8 @@ impl App {
         let save_path = &self.config.read().await.save_path;
         let path = Path::new(save_path)
             .join(MY_CANVAS_FILES_FOLDER_NAME)
-            .join(folder_path)
-            .join(name);
+            .join(outputs::relative_path(folder_path)?)
+            .join(outputs::safe_name(name));
         self.open_path(path.to_str().unwrap_or_default())
     }
 
@@ -1047,14 +1025,15 @@ impl App {
     }
 
     fn open_path(&self, path: &str) -> Result<()> {
+        let path = outputs::display_path(Path::new(path));
         #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(path).output()?;
+        let _ = std::process::Command::new("open").arg(&path).output()?;
 
         #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("xdg-open").arg(path).output()?;
+        let _ = std::process::Command::new("xdg-open").arg(&path).output()?;
 
         #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("explorer").arg(path).output()?;
+        let _ = std::process::Command::new("explorer").arg(&path).output()?;
 
         Ok(())
     }
@@ -1069,9 +1048,9 @@ impl App {
         self.open_path(&config_dir)
     }
 
-    pub async fn delete_file(&self, file: &File) -> Result<()> {
+    pub async fn delete_file(&self, file: &File, course: Option<&outputs::DownloadCourse>) -> Result<()> {
         let save_path = &self.config.read().await.save_path;
-        let path = Path::new(save_path).join(&file.display_name);
+        let path = outputs::existing_file(Path::new(save_path), &file.display_name, "attachment", course);
         fs::remove_file(path)?;
         Ok(())
     }
@@ -1083,10 +1062,7 @@ impl App {
         folder_path: &str,
     ) -> Result<()> {
         let save_path = &self.config.read().await.save_path;
-        let path = Path::new(save_path)
-            .join(self.get_course_identifier(course))
-            .join(folder_path)
-            .join(&file.display_name);
+        let path = outputs::course_file_path(Path::new(save_path), course, folder_path, &file.display_name)?;
         fs::remove_file(path)?;
         Ok(())
     }
@@ -1095,15 +1071,15 @@ impl App {
         let save_path = &self.config.read().await.save_path;
         let path = Path::new(save_path)
             .join(MY_CANVAS_FILES_FOLDER_NAME)
-            .join(folder_path)
-            .join(&file.display_name);
+            .join(outputs::relative_path(folder_path)?)
+            .join(outputs::safe_name(&file.display_name));
         fs::remove_file(path)?;
         Ok(())
     }
 
-    pub async fn delete_file_with_name(&self, name: &str) -> Result<()> {
+    pub async fn delete_file_with_name(&self, name: &str, course: Option<&outputs::DownloadCourse>) -> Result<()> {
         let save_path = &self.config.read().await.save_path;
-        let path = Path::new(save_path).join(name);
+        let path = outputs::existing_file(Path::new(save_path), name, "attachment", course);
         fs::remove_file(path)?;
         Ok(())
     }
@@ -1143,8 +1119,12 @@ impl App {
     }
 
     pub async fn save_config(&self, config: AppConfig) -> Result<()> {
+        if config.proxy_port == 0 {
+            return Err(AppError::VideoDownloadError("播放代理端口必须为 1–65535 之间的整数，请前往「设置 → 高级与实验 → 播放代理端口」修改".into()));
+        }
         crate::model::VideoSummaryOptions { prompt: config.video_summary_prompt.clone(),
             context_tokens: config.video_summary_context_tokens, output_tokens: config.video_summary_output_tokens }.validate()?;
+        crate::diagnostics::protect_config(&config);
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
         fs::write(&config_path, serde_json::to_vec(&config).unwrap())?;
@@ -1154,8 +1134,8 @@ impl App {
         }
         Self::apply_llm_config(&config, &self.client).await?;
         self.client.set_debug_mode(config.debug_mode);
-        let was_enabled = self.config.read().await.mcp_enabled;
-        *self.config.write().await = config;
+        self.client.configure_video_auth(&config.token, &config.ja_auth_cookie, false).await;
+        let was_enabled = self.update_runtime_config(config).await.mcp_enabled;
         let is_enabled = self.config.read().await.mcp_enabled;
         if was_enabled != is_enabled {
             if is_enabled {
@@ -1273,7 +1253,8 @@ impl App {
         file_name: &str,
         folder_path: &str,
     ) -> Result<()> {
-        let path = Path::new(folder_path).join(file_name);
+        let output = self.download_output().await?;
+        let path = Path::new(folder_path).join(outputs::safe_name(file_name));
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
         for (row, row_data) in data.iter().enumerate() {
@@ -1281,13 +1262,15 @@ impl App {
                 sheet.write_string(row as u32, col as u16, col_data)?;
             }
         }
-        workbook.save(path)?;
+        workbook.save(&path)?;
+        output.register(&path).await?;
         Ok(())
     }
 
-    pub async fn export_users(&self, users: &[User], save_name: &str) -> Result<()> {
+    pub async fn export_users(&self, users: &[User], save_name: &str, course: Option<&outputs::DownloadCourse>) -> Result<()> {
+        let output = self.download_output().await?;
         let save_path = self.config.read().await.save_path.clone();
-        let path = Path::new(&save_path).join(save_name);
+        let path = outputs::directory(Path::new(&save_path), "export", course)?.join(outputs::safe_name(save_name));
 
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
@@ -1311,7 +1294,8 @@ impl App {
             sheet.write_string(row, 5, &user.short_name)?;
             sheet.write_string(row, 6, &user.login_id)?;
         }
-        workbook.save(path)?;
+        workbook.save(&path)?;
+        output.register(&path).await?;
         Ok(())
     }
 
@@ -1551,7 +1535,7 @@ try {{
             .extension()
             .and_then(|value| value.to_str())
             .map(str::to_lowercase)
-            .ok_or_else(|| AppError::UnsupportedFileExtensionError(file.display_name.clone()))?;
+            .ok_or_else(|| AppError::UnsupportedFileExtensionError("(missing)".to_owned()))?;
         if !matches!(extension.as_str(), "doc" | "docx" | "ppt" | "pptx") {
             return Err(AppError::UnsupportedFileExtensionError(extension));
         }
@@ -1600,8 +1584,26 @@ try {{
     pub fn is_ffmpeg_installed() -> bool {
         let output = Command::new("ffmpeg").arg("-version").output();
         match output {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+            Ok(output) => {
+                let success = output.status.success();
+                tracing::info!(
+                    operation = "ffmpeg_probe",
+                    success,
+                    exit_code = ?output.status.code(),
+                    "FFmpeg availability check completed"
+                );
+                success
+            }
+            Err(error) => {
+                tracing::warn!(
+                    operation = "ffmpeg_probe",
+                    success = false,
+                    error_kind = ?error.kind(),
+                    raw_os_error = ?error.raw_os_error(),
+                    "FFmpeg availability check failed"
+                );
+                false
+            }
         }
     }
 
@@ -1678,16 +1680,65 @@ try {{
     }
 
     pub fn read_log_content() -> Result<String> {
-        let log_file_path = App::config_dir()?;
-        let path = Path::new(&log_file_path).join("app.log");
-        let content = fs::read_to_string(path)?;
-        Ok(content)
+        let path = Path::new(&App::config_dir()?).join("app.log");
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
 #[cfg(test)]
 mod live_proxy_tests {
     use super::*;
+
+    fn proxy_app(port: u16) -> App {
+        App {
+            client: Arc::new(Client::new_without_proxy("http://127.0.0.1", "", "", "", None)),
+            current_account: Default::default(),
+            config: RwLock::new(AppConfig { proxy_port: port, ..Default::default() }),
+            handle: Default::default(), mcp_handle: Default::default(), cache: Default::default(),
+            attendance_handle: Default::default(), attendance_status: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_proxy_port_releases_old_listener_and_retries_a_conflict() {
+        let app = proxy_app(0);
+        // Port zero is only used here to ask the OS for an available test port.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let old_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        app.config.write().await.proxy_port = old_port;
+        assert!(app.prepare_proxy().await.unwrap());
+        let original_task = app.handle.read().await.as_ref().unwrap().id();
+        app.update_runtime_config(app.get_config().await).await;
+        assert_eq!(app.handle.read().await.as_ref().unwrap().id(), original_task);
+
+        let conflict = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let new_port = conflict.local_addr().unwrap().port();
+        let mut config = app.get_config().await;
+        config.proxy_port = new_port;
+        app.update_runtime_config(config).await;
+        assert!(app.handle.read().await.is_none());
+        let _released = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, old_port)).unwrap();
+        let error = app.prepare_proxy().await.unwrap_err().to_string();
+        assert!(error.contains(&format!("127.0.0.1:{new_port}")));
+        assert!(error.contains("设置 → 高级与实验 → 播放代理端口"));
+        assert!(app.handle.read().await.is_none());
+        drop(conflict);
+        assert!(app.prepare_proxy().await.unwrap());
+        app.stop_proxy().await;
+    }
+
+    #[tokio::test]
+    async fn saving_zero_proxy_port_is_rejected_before_writing_config() {
+        let app = proxy_app(3030);
+        let error = app.save_config(AppConfig { proxy_port: 0, ..Default::default() }).await.unwrap_err();
+        assert!(error.to_string().contains("1–65535"));
+        assert_eq!(app.get_config().await.proxy_port, 3030);
+    }
 
     #[test]
     fn live_playlist_rewrites_segments_variants_keys_and_maps() {

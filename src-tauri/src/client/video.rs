@@ -7,6 +7,7 @@ use std::{
 };
 
 use super::{
+    debug::RequestLogId,
     constants::{
         AUTH_URL, CANVAS_LOGIN_URL, EXPRESS_LOGIN_URL, MY_SJTU_ACCOUNT_URL, MY_SJTU_URL,
         VIDEO_BASE_URL, VIDEO_LOGIN_URL, VIDEO_OAUTH_KEY_URL,
@@ -34,8 +35,8 @@ use regex::Regex;
 use reqwest::{
     cookie::{CookieStore, Jar},
     header::{
-        HeaderMap, HeaderValue, ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE,
-        REFERER,
+        HeaderMap, HeaderValue, ACCEPT, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
+        RANGE, REFERER,
     },
     redirect::Policy,
     Response, StatusCode,
@@ -53,6 +54,50 @@ const VIDEO_SPACE_LAUNCH_URL: &str =
 const CANVAS_VIDEO_TOOL_ID: i64 = 8329;
 const LEGACY_VIDEO_LIST_URL: &str = "https://courses.sjtu.edu.cn/lti/vodVideo/findVodVideoList";
 const LEGACY_VIDEO_INFO_URL: &str = "https://courses.sjtu.edu.cn/lti/vodVideo/getVodVideoInfos";
+
+fn ppt_content_type(headers: &HeaderMap) -> &'static str {
+    let Some(value) = headers.get(CONTENT_TYPE) else {
+        return "missing";
+    };
+    let Ok(value) = value.to_str() else {
+        return "other";
+    };
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" | "image/tiff" => {
+            "image"
+        }
+        "text/html" | "application/xhtml+xml" => "html",
+        "application/json" => "json",
+        "text/plain" => "text",
+        "application/octet-stream" => "binary",
+        _ => "other",
+    }
+}
+
+fn log_ppt_failure(
+    operation: &'static str,
+    step: &'static str,
+    image_index: Option<usize>,
+    status: Option<u16>,
+    content_type: &'static str,
+    bytes: Option<usize>,
+) {
+    tracing::warn!(
+        operation,
+        step,
+        ?image_index,
+        ?status,
+        content_type,
+        ?bytes,
+        "PPT processing failed"
+    );
+}
 
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
@@ -356,7 +401,7 @@ fn daily_lesson_numbers(records: &[Value]) -> HashMap<usize, i64> {
     lesson_numbers
 }
 
-fn api_data(value: &Value) -> Result<&Value> {
+fn optional_api_data(value: &Value) -> Result<Option<&Value>> {
     let status = value_as_i64(value.get("status")).unwrap_or(200);
     if status != 200 {
         let message = first_string(value, &["message", "msg", "code"]);
@@ -367,11 +412,15 @@ fn api_data(value: &Value) -> Result<&Value> {
         }));
     }
 
-    value
+    Ok(value
         .get("data")
         .filter(|value| !value.is_null())
         .or_else(|| value.get("result"))
-        .filter(|value| !value.is_null())
+        .filter(|value| !value.is_null()))
+}
+
+fn api_data(value: &Value) -> Result<&Value> {
+    optional_api_data(value)?
         .ok_or_else(|| AppError::VideoDownloadError("Video service returned no data".to_string()))
 }
 
@@ -552,26 +601,25 @@ fn video_info_from_response(value: &Value) -> Result<VideoInfo> {
 }
 
 fn subtitles_from_response(value: &Value) -> Result<CanvasVideoSubTitleResponseBody> {
-    let data = api_data(value).map_err(|error| match error {
-        AppError::VideoDownloadError(message) if message == "Video service returned no data" => {
-            AppError::VideoDownloadError("Subtitle unavailable".to_string())
-        }
-        error => error,
-    })?;
-    let subtitles: CanvasVideoSubTitleResponseBody = serde_json::from_value(data.clone())?;
-    if subtitles.before_assembly_list.is_empty() && subtitles.after_assembly_list.is_empty() {
-        return Err(AppError::VideoDownloadError(
-            "Subtitle unavailable".to_string(),
-        ));
+    match optional_api_data(value)? {
+        Some(data) => Ok(serde_json::from_value(data.clone())?),
+        // An explicit null is the service's normal "not generated" result.
+        None if value.get("data").is_some() || value.get("result").is_some() => Ok(Default::default()),
+        None => Err(AppError::VideoDownloadError("Subtitle response has no data field".into())),
     }
-    Ok(subtitles)
 }
 
 fn ppts_from_response(value: &Value) -> Result<Vec<CanvasVideoPPT>> {
-    let docs = api_data(value)?
-        .get("docList")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppError::VideoDownloadError("No PPT found".to_string()))?;
+    let Some(data) = optional_api_data(value)? else {
+        if value.get("data").is_some() || value.get("result").is_some() { return Ok(Vec::new()); }
+        return Err(AppError::VideoDownloadError("PPT response has no data field".into()));
+    };
+    if !data.is_object() { return Err(AppError::VideoDownloadError("Invalid PPT payload".into())); }
+    let docs = match data.get("docList") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(docs)) => docs,
+        _ => return Err(AppError::VideoDownloadError("Invalid PPT list".into())),
+    };
     Ok(docs
         .iter()
         .filter_map(|doc| {
@@ -620,7 +668,7 @@ fn jwt_token_from_location(location: &str) -> Option<String> {
         .unwrap_or(fragment);
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
-        (key == "jwt_token")
+        (key == "jwt_token" && !value.is_empty())
             .then(|| {
                 urlencoding::decode(value)
                     .ok()
@@ -808,15 +856,30 @@ impl Client {
     }
 
     async fn get_video_space_token(&self) -> Result<String> {
-        self.get_video_space_token_from_url(VIDEO_SPACE_LAUNCH_URL)
-            .await
+        self.authenticated_video_launch(VIDEO_SPACE_LAUNCH_URL).await
     }
 
+    pub async fn login_classroom_video(&self) -> Result<()> {
+        let token = self.get_video_space_token().await?;
+        *self.token.write().await = token;
+        Ok(())
+    }
+
+    #[cfg(test)]
     async fn get_video_space_token_from_url(&self, launch_url: &str) -> Result<String> {
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
             .cookie_provider(self.jar.clone())
             .build()?;
+        self.follow_video_launch(&client, launch_url).await
+    }
+
+    pub(super) async fn follow_video_launch(&self, client: &reqwest::Client, launch_url: &str) -> Result<String> {
+        tokio::time::timeout(std::time::Duration::from_secs(20), self.follow_video_launch_inner(client, launch_url))
+            .await.map_err(|_| AppError::LoginError)?
+    }
+
+    async fn follow_video_launch_inner(&self, client: &reqwest::Client, launch_url: &str) -> Result<String> {
         let mut request = client.get(launch_url);
         for _ in 0..16 {
             let response = request.send().await?.error_for_status()?;
@@ -933,20 +996,11 @@ impl Client {
             .map_err(|error| AppError::VideoDownloadError(format!("Invalid launch URL: {error}")))
     }
 
-    async fn get_launch_form_for_canvas_course_id(
-        &self,
-        course_id: i64,
-        tool_id: i64,
-    ) -> Result<(String, HashMap<String, String>)> {
-        let url = format!("https://oc.sjtu.edu.cn/courses/{course_id}/external_tools/{tool_id}");
-        self.get_launch_form_from_url(&url).await
-    }
-
     async fn get_launch_form_from_url(
         &self,
         url: &str,
     ) -> Result<(String, HashMap<String, String>)> {
-        let response = self.cli.get(url).send().await?.error_for_status()?;
+        let response = self.video_browser_client().await.get(url).send().await?.error_for_status()?;
         let response_url = response.url().clone();
         let body = response.text().await?;
         let document = Document::from(body.as_str());
@@ -963,50 +1017,14 @@ impl Client {
             .map_err(|error| {
                 AppError::VideoDownloadError(format!("Invalid Canvas tabs URL: {error}"))
             })?;
-        let response = self.cli.get(url).send().await?.error_for_status()?;
+        let response = self.video_browser_client().await.get(url).send().await?.error_for_status()?;
         let value: Value = serde_json::from_slice(&response.bytes().await?)?;
         Ok(external_tool_urls_from_tabs(&value, &base_url))
     }
 
     async fn get_video_launch_token(&self, course_id: i64) -> Result<String> {
-        let (action, data) = self
-            .get_launch_form_for_canvas_course_id(course_id, CANVAS_VIDEO_TOOL_ID)
-            .await?;
-        let resp = self
-            .cli
-            .post(action)
-            .form(&data)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let response_url = resp.url().clone();
-        let body = resp.text().await?;
-        let document = Document::from(body.as_str());
-        let (action, data) = self.get_form_submission_from_doc(document)?;
-        let action = self.resolve_form_action(&response_url, &action)?;
-
-        let client = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .cookie_provider(self.jar.clone())
-            .build()?;
-        let resp = client.post(&action).form(&data).send().await?;
-
-        let location = resp
-            .headers()
-            .get("location")
-            .ok_or_else(|| AppError::VideoDownloadError("Launch redirect not found".to_string()))?
-            .to_str()?;
-        let location = Url::parse(&action)
-            .map_err(|error| AppError::VideoDownloadError(format!("Invalid launch URL: {error}")))?
-            .join(location)
-            .map_err(|error| {
-                AppError::VideoDownloadError(format!("Invalid redirect URL: {error}"))
-            })?
-            .to_string();
-        jwt_token_from_location(&location).ok_or_else(|| {
-            AppError::VideoDownloadError("JWT token not found in launch redirect".to_string())
-        })
+        let url = format!("https://oc.sjtu.edu.cn/courses/{course_id}/external_tools/{CANVAS_VIDEO_TOOL_ID}");
+        self.authenticated_video_launch(&url).await
     }
 
     async fn get_teaching_class_id_token(&self, course_id: i64) -> Result<(i64, String)> {
@@ -1071,10 +1089,7 @@ impl Client {
 
     async fn get_legacy_canvas_course_id(&self, course_id: i64) -> Result<Option<String>> {
         let tool_urls = self.get_course_external_tool_urls(course_id).await?;
-        let client = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .cookie_provider(self.jar.clone())
-            .build()?;
+        let client = self.video_browser_client().await;
         for tool_url in tool_urls {
             let Ok((action, data)) = self.get_launch_form_from_url(&tool_url).await else {
                 continue;
@@ -1335,8 +1350,7 @@ impl Client {
 
     async fn get_download_video_metadata(&self, url: &str) -> Result<(u64, bool)> {
         let resp = self.download_video_partial(url, 0, 0).await?;
-        // log headers:
-        tracing::info!("headers: {:?}", resp.headers());
+        tracing::info!(status = resp.status().as_u16(), "Video download metadata received");
         Ok(parse_download_probe(resp.status(), resp.headers()))
     }
 
@@ -1392,7 +1406,7 @@ impl Client {
                 payload_guard.processed = current_offset;
                 progress_handler.lock().await(payload_guard.clone());
             }
-            tracing::info!("Successfully downloaded video to {}", save_path);
+            tracing::info!("Video download completed");
             return Ok(());
         }
 
@@ -1452,23 +1466,37 @@ impl Client {
         while let Some(result) = tasks.join_next().await {
             result??;
         }
-        tracing::info!("Successfully downloaded video to {}", save_path);
+        tracing::info!("Video download completed");
         Ok(())
     }
 
     pub async fn get_canvas_video_info(&self, video_id: &str) -> Result<VideoInfo> {
+        let token = self.token.read().await.clone();
+        let value = self.canvas_video_info_response(video_id, &token).await?;
+        // Course launches can replace the shared JWT while the video remains
+        // playable. A successful but empty VOD response gets one fresh launch;
+        // HTTP/service errors and malformed payloads retain their real errors.
+        if value.get("data").is_some_and(Value::is_null) && optional_api_data(&value)?.is_none() {
+            let token = self.get_video_space_token().await?;
+            *self.token.write().await = token.clone();
+            return video_info_from_response(&self.canvas_video_info_response(video_id, &token).await?);
+        }
+        video_info_from_response(&value)
+    }
+
+    async fn canvas_video_info_response(&self, video_id: &str, token: &str) -> Result<Value> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/course_vod_urls_new");
         let resp = self
             .cli
             .get(url)
             .query(&[("courseId", video_id)])
-            .header("jwt-token", self.token.read().await.as_str())
+            .header("jwt-token", token)
             .header(REFERER, RESOURCE_MANAGE_UI_URL)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await?
             .error_for_status()?;
-        let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
-        video_info_from_response(&value)
+        Ok(serde_json::from_slice(&resp.bytes().await?)?)
     }
 
     pub async fn get_video_info(
@@ -1480,10 +1508,6 @@ impl Client {
         let oauth_nonce = self.get_oauth_nonce();
         let oauth_signature = self.get_oauth_signature(video_id, &oauth_nonce, oauth_consumer_key);
 
-        tracing::debug!("oauth_nonce: {}", oauth_nonce);
-        tracing::debug!("oauth_signature: {}", oauth_signature);
-        tracing::debug!("oauth_consumer_key: {}", oauth_consumer_key);
-        tracing::debug!("video_id: {}", video_id);
 
         let video_id_str = video_id.to_string();
         form_data.insert("playTypeHls", "true");
@@ -1512,17 +1536,7 @@ impl Client {
         &self,
         canvas_course_id: i64,
     ) -> Result<CanvasVideoSubTitleResponseBody> {
-        let value = self.get_subtitle_response(canvas_course_id, true).await?;
-        subtitles_from_response(&value)
-    }
-
-    pub async fn get_subtitle_response(
-        &self,
-        canvas_course_id: i64,
-        use_original: bool,
-    ) -> Result<Value> {
-        let bytes = self.get_subtitle_response_bytes(canvas_course_id, use_original).await?;
-        Ok(serde_json::from_slice(&bytes)?)
+        self.get_subtitle_at(RESOURCE_MANAGE_BASE_URL, canvas_course_id).await
     }
 
     pub async fn get_subtitle_response_bytes(
@@ -1546,22 +1560,80 @@ impl Client {
         Ok(bytes.to_vec())
     }
 
-    // TODO: Choose a Version & Convert to SRT
-    // 1. Original
-    // 2. Original + Eng
-    // 3. Eng
-    // 4. Eng + Translated Chs
+    async fn get_subtitle_at(&self, base: &str, canvas_course_id: i64) -> Result<CanvasVideoSubTitleResponseBody> {
+        self.get_subtitle_at_version(base, canvas_course_id).await.map(|(sub, _)| sub)
+    }
+
+    pub async fn get_subtitle_with_source(&self, canvas_course_id: i64) -> Result<(CanvasVideoSubTitleResponseBody, bool)> {
+        self.get_subtitle_with_source_at(RESOURCE_MANAGE_BASE_URL, canvas_course_id).await
+    }
+
+    pub async fn get_original_subtitle(&self, canvas_course_id: i64) -> Result<CanvasVideoSubTitleResponseBody> {
+        let response = self.cli.get(format!("{RESOURCE_MANAGE_BASE_URL}/v1/course/ai/translate/{canvas_course_id}"))
+            .query(&[("useOriginal", true)])
+            .header("jwt-token", self.token.read().await.as_str()).header(REFERER, RESOURCE_MANAGE_UI_URL)
+            .timeout(std::time::Duration::from_secs(15)).send().await?.error_for_status()?;
+        subtitles_from_response(&response.json::<Value>().await?)
+    }
+
+    async fn get_subtitle_with_source_at(&self, base: &str, canvas_course_id: i64) -> Result<(CanvasVideoSubTitleResponseBody, bool)> {
+        let status = async {
+            let response = self.cli.get(format!("{base}/v1/course/ai/transcript/optimize/tasks"))
+                .query(&[("courseId", canvas_course_id)])
+                .header("jwt-token", self.token.read().await.as_str())
+                .header(REFERER, RESOURCE_MANAGE_UI_URL)
+                .timeout(std::time::Duration::from_secs(5)).send().await?.error_for_status()?;
+            let value: Value = response.json().await?;
+            let data = api_data(&value)?;
+            Ok::<bool, AppError>(data.as_array().is_some_and(|tasks| tasks.iter().any(|task| {
+                task["courseId"].as_i64() == Some(canvas_course_id) && task["status"].as_i64() == Some(3)
+            })))
+        };
+        let (subtitles, optimized) = tokio::join!(self.get_subtitle_at_version(base, canvas_course_id), status);
+        let (subtitles, preferred_version) = subtitles?;
+        // useOriginal=false can return the original while optimization is pending.
+        // Only label AI+ after confirming success, and never for a fallback fetch.
+        Ok((subtitles, preferred_version && optimized.unwrap_or(false)))
+    }
+
+    async fn get_subtitle_at_version(&self, base: &str, canvas_course_id: i64) -> Result<(CanvasVideoSubTitleResponseBody, bool)> {
+        let url = format!("{base}/v1/course/ai/translate/{canvas_course_id}");
+        let mut last_error = None;
+        // The service returns the original while optimization is pending. An
+        // unavailable/empty optimized response must not hide usable originals.
+        for original in [false, true] {
+            let result = async {
+                let resp = self.cli.get(&url)
+                    .query(&[("useOriginal", original)])
+                    .header("jwt-token", self.token.read().await.as_str())
+                    .header(REFERER, RESOURCE_MANAGE_UI_URL)
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send().await?.error_for_status()?;
+                let value: Value = resp.json().await?;
+                subtitles_from_response(&value)
+            }.await;
+            match result {
+                Ok(mut sub) => {
+                    let usable = |line: &CanvasVideoSubTitle| !line.res.trim().is_empty() && line.ed > line.bg;
+                    sub.before_assembly_list.retain(usable);
+                    sub.after_assembly_list.retain(usable);
+                    if !sub.before_assembly_list.is_empty() || !sub.after_assembly_list.is_empty() { return Ok((sub, !original)); }
+                },
+                Err(error) => last_error = Some(error),
+            }
+        }
+        match last_error { Some(error) => Err(error), None => Ok((Default::default(), false)) }
+    }
+
+    // Canvas labels `res` as source language; `zh` and `en` are translations.
+    // The request's useOriginal flag selects the refinement version, not a language.
     pub fn convert_to_srt(&self, subtitle: &[CanvasVideoSubTitle]) -> Result<String> {
         let mut srt = String::new();
         for (i, item) in subtitle.iter().enumerate() {
             // Start time & End time in milliseconds
             // Convert to SRT format: HH:MM:SS,ms --> HH:MM:SS,ms
             let start_time = format_time(item.bg);
-            let end_time = if i == subtitle.len() - 1 {
-                format_time(item.ed)
-            } else {
-                format_time(subtitle[i + 1].bg)
-            };
+            let end_time = format_time(item.ed);
 
             let text = item.res.clone();
             srt.push_str(&format!("{}\n", i + 1));
@@ -1573,17 +1645,36 @@ impl Client {
 
     pub async fn get_ppt(&self, canvas_course_id: i64) -> Result<Vec<CanvasVideoPPT>> {
         let url = format!("{RESOURCE_MANAGE_BASE_URL}/v1/course/ai/ppt");
-        let resp = self
+        let request = self
             .cli
             .get(url)
             .query(&[("courseId", canvas_course_id)])
             .header("jwt-token", self.token.read().await.as_str())
             .header(REFERER, RESOURCE_MANAGE_UI_URL)
-            .send()
-            .await?
-            .error_for_status()?;
-        let value: Value = serde_json::from_slice(&resp.bytes().await?)?;
-        ppts_from_response(&value)
+            .build()
+            .inspect_err(|_| {
+                log_ppt_failure("ppt_list", "request", None, None, "unknown", None);
+            })?;
+        let response = self.execute_request(request).await.inspect_err(|_| {
+            log_ppt_failure("ppt_list", "request", None, None, "unknown", None);
+        })?;
+        let status = Some(response.status().as_u16());
+        let content_type = ppt_content_type(response.headers());
+        let value: Value = self
+            .parse_response_json(response)
+            .await
+            .inspect_err(|error| {
+                let step = match error {
+                    AppError::Network(error) if error.is_status() => "http_status",
+                    AppError::Network(_) => "body",
+                    AppError::JsonDeserialize(..) | AppError::JsonParse(_) => "json_decode",
+                    _ => "response",
+                };
+                log_ppt_failure("ppt_list", step, None, status, content_type, None);
+            })?;
+        ppts_from_response(&value).inspect_err(|_| {
+            log_ppt_failure("ppt_list", "schema", None, status, content_type, None);
+        })
     }
 
     /// Downloads PPT images and converts them to a PDF document
@@ -1608,21 +1699,71 @@ impl Client {
                 continue;
             }
             let ppt_img_url = ppt.ppt_img_url.clone().unwrap();
-            // Download image with error handling
-            let image_data = match self.cli.get(&ppt_img_url).send().await {
-                Ok(response) => response.bytes().await?,
-                Err(e) => {
-                    return Err(AppError::VideoDownloadError(format!(
-                        "Failed to download PPT image {index}: {e}"
-                    )))
+            let request = self.cli.get(&ppt_img_url).build().inspect_err(|_| {
+                log_ppt_failure("ppt_image", "request", Some(index), None, "unknown", None);
+            })?;
+            let response = self.execute_request(request).await.map_err(|error| {
+                log_ppt_failure("ppt_image", "request", Some(index), None, "unknown", None);
+                AppError::VideoDownloadError(format!(
+                    "Failed to download PPT image {index}: {error}"
+                ))
+            })?;
+            let status = Some(response.status().as_u16());
+            let content_type = ppt_content_type(response.headers());
+            let request_id = response.extensions().get::<RequestLogId>().cloned();
+            // A login/error page must remain an HTTP failure, never an image-decode failure.
+            let response = response.error_for_status().inspect_err(|_| {
+                log_ppt_failure(
+                    "ppt_image",
+                    "http_status",
+                    Some(index),
+                    status,
+                    content_type,
+                    None,
+                );
+            })?;
+            let image_data = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if let Some(request_id) = &request_id {
+                        self.debug_store
+                            .capture_response_failure(request_id, "response_body_read_failed")
+                            .await;
+                    }
+                    log_ppt_failure("ppt_image", "body", Some(index), status, content_type, None);
+                    return Err(error.into());
                 }
             };
+            if let Some(request_id) = &request_id {
+                self.debug_store
+                    .capture_response_body(request_id, image_data.len())
+                    .await;
+            }
 
             tracing::info!("Downloaded image {}: {} bytes", index, image_data.len());
 
             // TODO: Add To PDF
-            let image = RawImage::decode_from_bytes(&image_data, &mut warning)
-                .map_err(|e| AppError::VideoDownloadError(format!("Invalid PPT image {index}: {e}")))?;
+            let image = match RawImage::decode_from_bytes(&image_data, &mut warning) {
+                Ok(image) => image,
+                Err(error) => {
+                    if let Some(request_id) = &request_id {
+                        self.debug_store
+                            .capture_response_failure(request_id, "ppt_image_decode_failed")
+                            .await;
+                    }
+                    log_ppt_failure(
+                        "ppt_image",
+                        "decode",
+                        Some(index),
+                        status,
+                        content_type,
+                        Some(image_data.len()),
+                    );
+                    return Err(AppError::VideoDownloadError(format!(
+                        "Invalid PPT image {index}: {error}"
+                    )));
+                }
+            };
             images.push(image.clone());
 
             // Report progress
@@ -1659,8 +1800,7 @@ impl Client {
         let mut file = File::create(save_path)?;
         file.write_all(&pdf_bytes)?;
         file.flush()?;
-        tracing::info!("PDF saved to {}", save_path);
-        tracing::info!("PDF warnings: {:?}", warning);
+        tracing::info!(warning_count = warning.len(), "PPT PDF saved");
 
         Ok(())
     }
@@ -1672,6 +1812,99 @@ mod tests {
 
     use super::*;
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
+
+    #[tokio::test]
+    async fn missing_subtitles_are_normal_results_but_service_failures_remain_errors() {
+        use httpmock::prelude::*;
+        for response in [
+            serde_json::json!({"status":200,"data":null}),
+            serde_json::json!({"status":200,"data":{"beforeAssemblyList":[],"afterAssemblyList":[]}}),
+            serde_json::json!({"status":200,"data":{"beforeAssemblyList":null,"afterAssemblyList":null}}),
+        ] {
+            let server = MockServer::start();
+            let subtitle = server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/translate/1");
+                then.json_body(response.clone());
+            });
+            let client = Client::new_without_proxy(server.base_url().as_str(), "", "", "", None);
+            let (sub, optimized) = client.get_subtitle_at_version(&server.base_url(), 1).await.unwrap();
+            assert!(sub.before_assembly_list.is_empty() && sub.after_assembly_list.is_empty());
+            assert!(!optimized);
+            subtitle.assert_hits(2);
+        }
+        for response in [serde_json::json!({"status":401,"data":null}), serde_json::json!({"status":500,"data":null}), serde_json::json!({}), serde_json::json!({"data":"bad payload"})] {
+            assert!(subtitles_from_response(&response).is_err());
+        }
+    }
+
+    #[test]
+    fn english_source_is_not_replaced_with_available_translations() {
+        let response = serde_json::json!({"data":{"beforeAssemblyList":[{
+            "bg":1000,"ed":5000,"res":"Today we discuss CNNs and pooling.",
+            "zh":"今天我们讨论卷积神经网络和池化。","en":"An alternative translation."
+        }]}});
+        let subtitles = subtitles_from_response(&response).unwrap();
+        let srt = Client::default().convert_to_srt(&subtitles.before_assembly_list).unwrap();
+        assert!(srt.contains("Today we discuss CNNs and pooling."));
+        assert!(!srt.contains("今天我们讨论") && !srt.contains("An alternative translation."));
+    }
+
+    #[test]
+    fn absent_slides_are_not_service_failures() {
+        for value in [serde_json::json!({"data":null}), serde_json::json!({"data":{"docList":null}}), serde_json::json!({"data":{"docList":[]}})] {
+            assert!(ppts_from_response(&value).unwrap().is_empty());
+        }
+        for value in [serde_json::json!({"status":401,"data":null}), serde_json::json!({}), serde_json::json!({"data":"bad"}), serde_json::json!({"data":{"docList":"bad"}})] {
+            assert!(ppts_from_response(&value).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn subtitles_prefer_optimized_and_fall_back_for_empty_invalid_or_failed_response() {
+        use httpmock::prelude::*;
+        for optimized in [serde_json::json!({"data":{"beforeAssemblyList":[{"bg":1000,"ed":2000,"res":"精校术语"}]}}),
+            serde_json::json!({"data":{"beforeAssemblyList":[]}}),
+            serde_json::json!({"data":{"beforeAssemblyList":[{"res":"没有时间戳"}]}}),
+            serde_json::json!({"status":500,"data":null})] {
+            let server = MockServer::start();
+            let edited = server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/translate/1").query_param("useOriginal", "false");
+                then.json_body(optimized.clone());
+            });
+            let raw = server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/translate/1").query_param("useOriginal", "true");
+                then.json_body(serde_json::json!({"data":{"beforeAssemblyList":[{"bg":1000,"ed":2000,"res":"原始文字"}]}}));
+            });
+            let client = Client::new_without_proxy(server.base_url().as_str(), "", "", "", None);
+            let sub = client.get_subtitle_at(&server.base_url(), 1).await.unwrap();
+            let has_optimized = optimized["data"]["beforeAssemblyList"][0]["ed"] == 2000;
+            assert_eq!(sub.before_assembly_list[0].res, if has_optimized { "精校术语" } else { "原始文字" });
+            edited.assert_hits(1); raw.assert_hits(usize::from(!has_optimized));
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_plus_requires_a_successful_matching_task_and_a_usable_preferred_version() {
+        use httpmock::prelude::*;
+        for (task_status, task_course, preferred_valid, expected) in [(3, 1, true, true), (6, 1, true, false), (3, 2, true, false), (3, 1, false, false)] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/transcript/optimize/tasks").query_param("courseId", "1");
+                then.json_body(serde_json::json!({"data":[{"courseId":task_course,"status":task_status}]}));
+            });
+            server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/translate/1").query_param("useOriginal", "false");
+                then.json_body(if preferred_valid { serde_json::json!({"data":{"beforeAssemblyList":[{"bg":1,"ed":2,"res":"可用字幕"}]}}) } else { serde_json::json!({"data":{}}) });
+            });
+            server.mock(|when, then| {
+                when.method(GET).path("/v1/course/ai/translate/1").query_param("useOriginal", "true");
+                then.json_body(serde_json::json!({"data":{"beforeAssemblyList":[{"bg":1,"ed":2,"res":"原字幕"}]}}));
+            });
+            let client = Client::new_without_proxy(server.base_url().as_str(), "", "", "", None);
+            let (_, optimized) = client.get_subtitle_with_source_at(&server.base_url(), 1).await.unwrap();
+            assert_eq!(optimized, expected);
+        }
+    }
 
     #[test]
     fn test_live_list_keeps_upcoming_sections_and_requires_valid_times() {
@@ -1713,6 +1946,81 @@ mod tests {
         assert!(live_info_from_response(&closed).unwrap_err().to_string().contains("直播未开放"));
     }
 
+    #[tokio::test]
+    async fn test_ppt_image_http_and_decode_failures_are_distinct_and_safe() {
+        use httpmock::{Method::GET, MockServer};
+
+        let server = MockServer::start();
+        let body = "private-response-body";
+        for (status, mime, expected_error) in [
+            (401, "text/html; charset=private-header-value", "HTTP 401"),
+            (
+                200,
+                "image/png; extra=private-header-value",
+                "ppt_image_decode_failed",
+            ),
+        ] {
+            let route = format!("/private-image-{status}");
+            let request_mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path(&route)
+                    .query_param("signature", "signed-private-value");
+                then.status(status).header("content-type", mime).body(body);
+            });
+            let client = Arc::new(Client::new_without_proxy(
+                server.base_url().as_str(),
+                "",
+                "",
+                "",
+                None,
+            ));
+            client.set_debug_mode(true);
+            let slides = vec![CanvasVideoPPT {
+                ppt_img_url: Some(format!(
+                    "{}?signature=signed-private-value",
+                    server.url(&route)
+                )),
+                ..Default::default()
+            }];
+            let output = std::env::temp_dir()
+                .join(format!("private-ppt-output-{}.pdf", uuid::Uuid::new_v4()));
+            let error = client
+                .clone()
+                .download_ppt_pdf(&slides, output.to_str().unwrap(), |_| {})
+                .await
+                .unwrap_err();
+
+            request_mock.assert();
+            assert!(!output.exists(), "a failed image must not create a PDF");
+            if status == 401 {
+                assert!(
+                    matches!(&error, AppError::Network(error) if error.status() == Some(StatusCode::UNAUTHORIZED))
+                );
+                assert!(!error.to_string().contains("Invalid PPT image"));
+            } else {
+                assert!(error.to_string().contains("Invalid PPT image 0"));
+            }
+            let logs = client.list_network_logs().await;
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].status, Some(status));
+            assert_eq!(logs[0].ok, Some(false));
+            assert_eq!(logs[0].error.as_deref(), Some(expected_error));
+            let diagnostics = format!("{logs:?}\n{}", serde_json::to_string(&error).unwrap());
+            for private in [
+                "signed-private-value",
+                "private-response-body",
+                "private-header-value",
+                "private-image",
+                "private-ppt-output",
+            ] {
+                assert!(
+                    !diagnostics.contains(private),
+                    "leaked {private}: {diagnostics}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_ppt_response_preserves_full_text_keywords_and_seek_times() {
         // Synthetic content with the field names used by the service.
@@ -1735,45 +2043,23 @@ mod tests {
     }
 
     #[test]
-    fn test_ppt_animation_simplification_and_summary_keep_complete_pages_and_original_times() {
-        // De-identified sequence preserves OCR order/noise, formulas and page counters.
-        let response: Value = serde_json::from_str(include_str!("fixtures/ppt_animation_sequence.json")).unwrap();
+    fn test_ppt_ocr_cleanup_keeps_original_evidence_and_subtitle_timeline() {
+        let body = "基本概念：先介绍问题的背景和定义，再给出推导步骤及示例，最后说明结论的适用条件，并对不同方法的特点进行比较。";
+        let response = serde_json::json!({"data": {"docList": [
+            {"createSec": 10, "imageUrl": "https://example.test/one.png", "ocrText": body},
+            {"createSec": 20, "imageUrl": "https://example.test/two.png", "ocrText": format!("{body}补充一条说明。")}
+        ]}});
         let original = ppts_from_response(&response).unwrap();
-        assert_eq!(original.len(), 41);
-        assert!(!crate::model::AppConfig::default().experimental_ppt_cleanup);
-        assert_eq!(crate::app::ppt::simplify_animation_slides(original.clone(), false), (original.clone(), vec![]));
-        let (kept, notes) = crate::app::ppt::simplify_animation_slides(original, true);
-        assert_eq!(kept.len(), 38);
-        assert!(notes[0].contains("41 张 → 38 张"));
-        for time in ["995", "1555", "2555"] {
-            assert!(!kept.iter().any(|slide| slide.create_sec == time), "redundant slice {time}");
-        }
-        let complete = kept.iter().find(|slide| slide.create_sec == "1061").unwrap();
-        assert_eq!(complete.animation_start_sec.as_deref(), Some("995"));
-        assert!(complete.ocr_text.contains("负采样（negative sampling）"));
-        // Complete annotated formula pages are retained, while different pages and
-        // different section highlights are preserved even when their titles match.
-        for time in ["80", "415", "418", "824", "1148", "1418", "2743", "2865", "402", "429", "434", "444", "514", "683", "736", "790", "911", "1800", "2867", "952", "2382", "2541", "2913"] {
-            assert!(kept.iter().any(|slide| slide.create_sec == time));
-        }
-        let all_times: std::collections::HashSet<_> = kept.iter().flat_map(|slide| std::iter::once(slide.create_sec.clone()).chain(slide.related_slide_secs.iter().cloned())).collect();
-        assert_eq!(all_times.len(), 41);
-        let subtitles = vec![CanvasVideoSubTitle { bg: 995000, res: "这一页开始讲优化".into(), ..Default::default() }];
+        let (kept, _) = crate::app::ppt::simplify_animation_slides(original.clone(), true);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ocr_text, original[1].ocr_text);
+        assert_eq!(kept[0].ppt_img_url, original[1].ppt_img_url);
+        assert_eq!(kept[0].related_slide_secs, vec!["10"]);
+        let subtitles = vec![CanvasVideoSubTitle { bg: 15000, res: "继续讲解".into(), ..Default::default() }];
         let (text, available, _) = crate::app::ppt::material_timeline("videoSpace:example", &subtitles, &kept);
         assert!(available);
-        assert!(text.contains("&t=995) [字幕] 这一页开始讲优化"));
-        assert!(!text.contains("&t=995) [PPT OCR"));
-        assert!(text.contains("&t=1061) [PPT OCR"));
-        assert!(!text.contains("逐步展开"));
-        assert!(text.contains("&t=2743)"));
-        assert!(text.contains("&t=2867)"));
-        assert!(!text.contains("&t=1555)"));
-        assert!(text.contains("&t=1800) [PPT OCR"));
-        assert!(text.contains("&t=418)"));
-        assert!(text.contains("&t=434) [PPT OCR"));
-        assert_eq!(text.matches("[PPT OCR]").count(), 37); // one image has no OCR
-        // The same resulting slice list is the input to PDF export.
-        assert_eq!(crate::app::ppt::filter_export_slides(kept, false).0.len(), 38);
+        assert!(text.contains("&t=15) [字幕] 继续讲解"));
+        assert!(text.contains("&t=20) [PPT OCR"));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+import { downloadCourseContext } from "../lib/downloads";
+import { DownloadCourseContext } from "../lib/download_context";
 import { invoke } from "@tauri-apps/api/core";
 import AssignmentRoundedIcon from "@mui/icons-material/AssignmentRounded";
 import CalendarMonthRoundedIcon from "@mui/icons-material/CalendarMonthRounded";
@@ -33,7 +35,7 @@ import {
   Typography,
 } from "@mui/material";
 import dayjs from "dayjs";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import CourseSelect, { ALL_COURSES_ID } from "../components/course_select";
@@ -239,15 +241,16 @@ export default function AssignmentsPage() {
 
   const handleDownloadAttachment = async (attachment: Attachment) => {
     const file = attachmentToFile(attachment);
+    const course = courses.data.find((item) => item.id === courseScopeId);
     try {
-      await invoke("download_file", { file });
+      await invoke("download_file", { file, ...(course ? { course: downloadCourseContext(course) } : {}) });
       messageApi.success("下载成功", 0.5);
     } catch (error) {
       messageApi.error(`下载失败：${error}`);
     }
   };
 
-  const handleCourseSelect = (courseId: number) => {
+  const handleCourseSelect = useCallback((courseId: number) => {
     if (courseId === ALL_COURSES_ID) {
       setCourseScopeId(ALL_COURSES_ID);
       return;
@@ -258,7 +261,7 @@ export default function AssignmentsPage() {
     }
     setCourseScopeId(courseId);
     setSelectedCourseId(courseId);
-  };
+  }, [courses.data, setSelectedCourseId]);
 
   const courseScopeKey = courses.data.map((course) => course.id).join(",");
   useEffect(() => {
@@ -509,7 +512,7 @@ export default function AssignmentsPage() {
   return (
     <BasicLayout>
       {contextHolder}
-      {previewer}
+      <DownloadCourseContext.Provider value={selectedCourse ? downloadCourseContext(selectedCourse) : undefined}>{previewer}</DownloadCourseContext.Provider>
       {assignmentToModify ? (
         <ModifyDDLModal
           open={showModifyDDLModal}
@@ -558,7 +561,7 @@ export default function AssignmentsPage() {
               }}
             >
               <CourseSelect
-                onChange={(courseId) => void handleCourseSelect(courseId)}
+                onChange={handleCourseSelect}
                 disabled={operating}
                 courses={courses.data}
                 includeAllOption

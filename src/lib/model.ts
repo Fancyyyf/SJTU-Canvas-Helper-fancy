@@ -325,6 +325,7 @@ export interface AppConfig {
     llm_api_keys: LlmApiKeyEntry[];
     llm_active_api_key: string;
     video_summary_prompt?: string;
+    experimental_video_topics?: boolean;
     video_summary_context_tokens?: number;
     video_summary_output_tokens?: number;
     theme: Theme;
@@ -557,6 +558,14 @@ export interface GradeStatus {
 export interface QRCodeScanResult {
     file: File,
     contents: string[];
+}
+
+export interface QRCodeScanReport {
+    results: QRCodeScanResult[];
+    total_files: number;
+    image_files: number;
+    scanned_images: number;
+    failed_images: number;
 }
 
 export interface AttendanceWatchStatus {

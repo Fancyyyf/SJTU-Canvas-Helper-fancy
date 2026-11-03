@@ -1,5 +1,4 @@
 ﻿import { getVersion } from "@tauri-apps/api/app";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
 import ArticleRoundedIcon from "@mui/icons-material/ArticleRounded";
 import AssignmentRoundedIcon from "@mui/icons-material/AssignmentRounded";
 import HowToRegRoundedIcon from "@mui/icons-material/HowToRegRounded";
@@ -46,7 +45,7 @@ import {
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import { useAppMessage } from "../lib/message";
-import { logDiagnostic, logHandledError } from "../lib/logger";
+import { logDiagnostic } from "../lib/logger";
 import { LOG_LEVEL_INFO } from "../lib/model";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -57,6 +56,7 @@ import { moveSidebarItem } from "../lib/sidebar_order";
 import { checkForUpdates } from "../lib/utils";
 import { useUpdateNotice } from "../lib/update_notice";
 import { ChangeLogModal } from "./change_log_modal";
+import LogModal from "./log_modal";
 import AssignmentTurnedInRoundedIcon from "@mui/icons-material/AssignmentTurnedInRounded";
 import { useTasks } from "../lib/task_hooks";
 import { isTaskActive, taskManager } from "../lib/task_manager";
@@ -130,6 +130,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
   const currentTitle = pageTitleMap[currentKey] || "Canvas";
   const [version, setVersion] = useState("");
   const [showChangeLog, setShowChangeLog] = useState(false);
+  const [showLogModal, setShowLogModal] = useState(false);
   const [customizeSidebarOpen, setCustomizeSidebarOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -145,6 +146,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
     if (!active) {
       setMobileOpen(false);
       setShowChangeLog(false);
+      setShowLogModal(false);
       setTaskAnchor(null);
     }
   }, [active]);
@@ -160,23 +162,6 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
   }, [isDesktop, location.pathname]);
 
   useEffect(() => () => window.clearTimeout(pressTimerRef.current), []);
-
-  const handleOpenFeedback = async () => {
-    try {
-      await openExternal("mailto:923048992@sjtu.edu.cn");
-    } catch (error) {
-      logHandledError({
-        code: "SHELL.OPEN_FEEDBACK_FAILED",
-        scope: "layout",
-        action: "open_feedback_mail",
-        error,
-        userMessage: "未能打开反馈邮箱，请确认系统已配置邮件客户端。",
-        recoverable: true,
-        fallback: { used: true, strategy: "show_manual_guidance", result: "success" },
-      });
-      messageApi.error("未能打开反馈邮箱，请确认系统已配置邮件客户端。");
-    }
-  };
 
   const effectiveDrawerWidth = useMemo(() => {
     if (!isDesktop) {
@@ -557,7 +542,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
             <Button onClick={() => setShowChangeLog(true)} size="small" sx={{ minWidth: 0, px: 1 }}>
               更新日志
             </Button>
-            <Button onClick={() => void handleOpenFeedback()} size="small" sx={{ minWidth: 0, px: 1 }}>
+            <Button onClick={() => setShowLogModal(true)} size="small" sx={{ minWidth: 0, px: 1 }}>
               反馈
             </Button>
           </Stack>
@@ -635,6 +620,7 @@ export default function BasicLayout({ children, active = true, contentKey }: Rea
         onCancel={() => setShowChangeLog(false)}
         onOk={() => setShowChangeLog(false)}
       />
+      {active && showLogModal && <LogModal onClose={() => setShowLogModal(false)} />}
 
       <Dialog
         open={customizeSidebarOpen}

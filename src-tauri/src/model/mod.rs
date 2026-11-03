@@ -2,6 +2,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 mod video_summary;
 pub use video_summary::*;
+mod subtitle_proofread;
+pub use subtitle_proofread::*;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Course {
@@ -20,8 +22,16 @@ pub struct Course {
     pub teachers: Vec<Teacher>,
     #[serde(default)]
     pub term: Term,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_syllabus_body")]
     pub syllabus_body: String,
+}
+
+// Canvas uses null as well as an omitted/empty string for an unpublished syllabus.
+fn deserialize_syllabus_body<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +251,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub experimental_ppt_cleanup: bool,
     #[serde(default)]
+    pub experimental_video_topics: bool,
+    #[serde(default)]
     pub color_primary: Option<String>,
     #[serde(default)]
     pub mcp_enabled: bool,
@@ -281,6 +293,7 @@ impl Default for AppConfig {
             compact_mode: Default::default(),
             experimental_task_center_only: false,
             experimental_ppt_cleanup: false,
+            experimental_video_topics: false,
             color_primary: Default::default(),
             mcp_enabled: Default::default(),
             mcp_port: 3100,
@@ -861,6 +874,15 @@ pub struct QRCodeScanResult {
     pub contents: Vec<String>,
 }
 
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct QRCodeScanReport {
+    pub results: Vec<QRCodeScanResult>,
+    pub total_files: usize,
+    pub image_files: usize,
+    pub scanned_images: usize,
+    pub failed_images: usize,
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttendanceWatchStatus {
@@ -1245,10 +1267,16 @@ pub struct AnnualReport {
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasVideoSubTitleResponseBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_subtitles")]
     pub after_assembly_list: Vec<CanvasVideoSubTitle>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_subtitles")]
     pub before_assembly_list: Vec<CanvasVideoSubTitle>,
+}
+
+fn deserialize_nullable_subtitles<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<CanvasVideoSubTitle>, D::Error> {
+    Ok(Option::<Vec<CanvasVideoSubTitle>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]

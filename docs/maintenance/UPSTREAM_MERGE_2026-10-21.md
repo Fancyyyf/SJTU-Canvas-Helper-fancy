@@ -1,5 +1,7 @@
 # 2026-10-21 upstream 合并记录
 
+> 此文记录 2026-10-21 当时的目录决策。2026-11-03 已按用户要求统一迁移至 `script/`，见 [最新实施记录](UPSTREAM_INTEGRATION_2026-11-03.md)。
+
 - 合并前本地基线：`ce7b209`
 - 合并前本地修改快照：`87f6055`（`backup/pre-upstream-local-20261021`，含当时未跟踪的字幕资料）
 - upstream：`f804dd5`（`git@github.com:Okabe-Rintarou-0/SJTU-Canvas-Helper.git` 的 `main`）

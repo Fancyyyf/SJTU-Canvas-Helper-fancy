@@ -7,9 +7,9 @@ use crate::diagnostics::{sanitize_text, sanitize_url};
 pub enum AppError {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
-    #[error("Json deserialization error: {0}, object type: {1}, context: {2}")]
+    #[error("Json deserialization error, object type: {1}, context: {2}")]
     JsonDeserialize(serde_json::Error, String, String),
-    #[error("Json parse error: {0}")]
+    #[error("Json parse error, {}", crate::utils::json::error_context(.0))]
     JsonParse(#[from] serde_json::Error),
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
@@ -131,7 +131,7 @@ impl AppError {
                 error.is_connect(),
                 error
                     .url()
-                    .map(sanitize_url)
+                    .map(|url| sanitize_url(url.as_str()))
                     .unwrap_or_else(|| "<missing>".to_owned())
             ),
             Self::JsonDeserialize(error, object_type, _) => format!(
@@ -174,7 +174,9 @@ impl serde::Serialize for AppError {
                 "Application command failed"
             );
         }
-        serializer.serialize_str(self.to_string().as_ref())
+        // reqwest embeds the full request URL (including signed query values) in
+        // its display text. Tauri serializes this value back to the frontend.
+        serializer.serialize_str(&sanitize_text(&self.to_string()))
     }
 }
 

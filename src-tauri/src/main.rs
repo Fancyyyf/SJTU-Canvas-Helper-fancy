@@ -2,8 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    fs, io,
-    path::Path,
+    io,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -16,7 +15,7 @@ use model::{
     AttendanceSignResult, AttendanceWatchStatus, CalendarEvent, CanvasVideo, CloseBehavior, Colors,
     Course, DiscussionTopic, File, FileChatStreamChunkPayload, FileChatStreamDonePayload,
     FileChatStreamErrorPayload, Folder, FullDiscussion, LLMChatMessage, LogLevel,
-    ModuleItem, NetworkRequestLog, QRCodeScanResult, RelationshipTopo, Submission,
+    ModuleItem, NetworkRequestLog, QRCodeScanResult, QRCodeScanReport, RelationshipTopo, Submission,
     SystemSettings, User, UserSubmissions, VideoAggregateParams, VideoCourse, VideoInfo,
     VideoPlayInfo, VideoSource, CanvasLiveList, CanvasLiveInfo,
 };
@@ -28,11 +27,6 @@ use tauri::{
     Emitter, Manager, Runtime, Window,
 };
 use tauri_plugin_autostart::ManagerExt;
-use tracing::Level;
-use tracing_subscriber::{
-    fmt::{self, writer::MakeWriterExt},
-    layer::SubscriberExt,
-};
 
 use crate::app::App;
 mod app;
@@ -40,6 +34,7 @@ mod canvas_agent;
 mod personal_calendar;
 mod client;
 mod diagnostics;
+mod local_error_log;
 mod error;
 mod mcp;
 mod model;
@@ -54,7 +49,6 @@ lazy_static! {
     static ref APP: App = App::new();
 }
 
-const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
 fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
@@ -105,22 +99,40 @@ fn install_tray<R: Runtime>(app: &mut tauri::App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-fn rotate_log_if_oversized(log_dir: &str) -> io::Result<bool> {
-    let current = Path::new(log_dir).join("app.log");
-    let previous = Path::new(log_dir).join("app.previous.log");
-    let metadata = match fs::metadata(&current) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    if metadata.len() < MAX_LOG_FILE_BYTES {
-        return Ok(false);
-    }
-    if previous.exists() {
-        fs::remove_file(&previous)?;
-    }
-    fs::rename(current, previous)?;
-    Ok(true)
+#[tauri::command]
+async fn app_data(account: String, request: app::data::DataRequest) -> std::result::Result<serde_json::Value, String> {
+    APP.application_data(account, request).await
+}
+
+#[tauri::command]
+async fn get_video_subtitle_versions(request: app::video_library::RecordingRequest) -> Result<app::video_library::VideoSubtitleVersions> {
+    APP.get_video_subtitle_versions(request).await
+}
+
+#[tauri::command]
+async fn inspect_video_recording(request: app::video_library::RecordingRequest) -> Result<app::video_library::VideoRecordingStatus> {
+    APP.inspect_video_recording(request).await
+}
+
+#[tauri::command]
+async fn proofread_video_subtitles(
+    request: app::video_library::RecordingRequest,
+    on_status: tauri::ipc::Channel<String>,
+) -> Result<app::video_library::ProofreadVideoResult> {
+    APP.proofread_video_subtitles(request, &move |status| { let _ = on_status.send(status); }).await
+}
+
+#[tauri::command]
+async fn reset_video_subtitle_proofread(request: app::video_library::RecordingRequest) -> Result<app::video_library::VideoMaterial> {
+    APP.reset_video_subtitle_proofread(request).await
+}
+
+#[tauri::command]
+async fn transcribe_video_material(
+    request: app::video_library::RecordingRequest,
+    on_status: tauri::ipc::Channel<String>,
+) -> Result<app::video_library::VideoMaterial> {
+    APP.transcribe_video_material(request, &move |status| { let _ = on_status.send(status); }).await
 }
 
 #[tauri::command]
@@ -134,8 +146,31 @@ fn read_log_content() -> Result<String> {
 }
 
 #[tauri::command]
-fn frontend_log(event: diagnostics::FrontendDiagnosticEvent) {
-    diagnostics::emit_frontend_event(event);
+fn frontend_log(event: local_error_log::FrontendDiagnosticEvent) {
+    local_error_log::emit_frontend_event(event);
+}
+
+#[tauri::command]
+fn read_diagnostic_report() -> String {
+    diagnostics::report()
+}
+
+#[tauri::command]
+async fn save_diagnostic_report(path: String) -> Result<()> {
+    let output = APP.download_output().await;
+    diagnostics::save_report(std::path::Path::new(&path))?;
+    if let Ok(output) = output {
+        if let Err(error) = output.register(std::path::Path::new(&path)).await {
+            tracing::warn!("诊断信息已导出，下载索引更新失败：{error}");
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_log_directory() -> Result<()> {
+    let directory = diagnostics::directory()?;
+    APP.open_local_path(&directory.to_string_lossy())
 }
 
 #[tauri::command]
@@ -258,6 +293,7 @@ async fn check_zhipu_balance(cli: &reqwest::Client, api_key: &str) -> Result<Use
         return Err(AppError::LLMError("智谱余额查询失败，请检查 API Key。".into()));
     }
     let text = resp.text().await?;
+    tracing::info!("Zhipu balance request completed");
     let body: ZhipuBalanceResponse = serde_json::from_str(&text)?;
     tracing::debug!(provider = "zhipu", "LLM balance response parsed");
     Ok(UserBalance {
@@ -295,7 +331,10 @@ async fn run_video_aggregate<R: Runtime>(
     window: Window<R>,
     params: VideoAggregateParams,
 ) -> Result<i32> {
-    App::run_video_aggregate(window, &params).await
+    let output = APP.download_output().await?;
+    let code = App::run_video_aggregate(window, &params).await?;
+    if code == 0 { output.register(&std::path::Path::new(&params.output_dir).join(&params.output_name)).await?; }
+    Ok(code)
 }
 
 #[tauri::command]
@@ -471,6 +510,11 @@ async fn sign_attendance_url(window: Window, url: String) -> Result<AttendanceSi
 }
 
 #[tauri::command]
+async fn scan_course_qrcodes(course_id: i64) -> Result<QRCodeScanReport> {
+    APP.scan_course_qrcodes(course_id).await
+}
+
+#[tauri::command]
 async fn list_folder_files(folder_id: i64) -> Result<Vec<File>> {
     APP.list_folder_files(folder_id).await
 }
@@ -492,6 +536,7 @@ async fn list_folder_folders(folder_id: i64) -> Result<Vec<Folder>> {
 
 #[tauri::command]
 async fn test_token(token: String) -> Result<User> {
+    diagnostics::protect_secret(&token);
     APP.test_token(&token).await
 }
 
@@ -686,13 +731,13 @@ async fn start_subtitle_chat_stream(
 }
 
 #[tauri::command]
-async fn export_users(users: Vec<User>, save_name: String) -> Result<()> {
-    APP.export_users(&users, &save_name).await
+async fn export_users(users: Vec<User>, save_name: String, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.export_users(&users, &save_name, course.as_ref()).await
 }
 
 #[tauri::command]
-async fn open_file(name: String) -> Result<()> {
-    APP.open_file(&name).await
+async fn open_file(name: String, kind: Option<String>, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.open_file(&name, kind.as_deref().unwrap_or("attachment"), course.as_ref()).await
 }
 
 #[tauri::command]
@@ -721,8 +766,8 @@ async fn open_config_dir() -> Result<()> {
 }
 
 #[tauri::command]
-async fn delete_file(file: File) -> Result<()> {
-    APP.delete_file(&file).await
+async fn delete_file(file: File, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.delete_file(&file, course.as_ref()).await
 }
 
 #[tauri::command]
@@ -736,8 +781,8 @@ async fn delete_my_file(file: File, folder_path: String) -> Result<()> {
 }
 
 #[tauri::command]
-async fn delete_file_with_name(name: String) -> Result<()> {
-    APP.delete_file_with_name(&name).await
+async fn delete_file_with_name(name: String, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.delete_file_with_name(&name, course.as_ref()).await
 }
 
 #[tauri::command]
@@ -748,8 +793,20 @@ async fn delete_path_file(path: String) -> Result<()> {
 
 #[tauri::command]
 async fn save_path_file(path: String, content: Vec<u8>) -> Result<()> {
-    std::fs::write(path, content)?;
+    let output = APP.download_output().await?;
+    std::fs::write(&path, content)?;
+    output.register(std::path::Path::new(&path)).await?;
     Ok(())
+}
+
+#[tauri::command]
+async fn download_directory(kind: String, course: Option<utils::download::DownloadCourse>, root: Option<String>) -> Result<String> {
+    APP.download_directory(&kind, course.as_ref(), root.as_deref()).await
+}
+
+#[tauri::command]
+async fn downloaded_files(account: String, request: app::downloads::DownloadRequest) -> std::result::Result<serde_json::Value, String> {
+    APP.downloaded_files(account, request).await
 }
 
 #[tauri::command]
@@ -762,8 +819,8 @@ async fn export_excel(
 }
 
 #[tauri::command]
-async fn download_file<R: Runtime>(window: Window<R>, file: File) -> Result<()> {
-    APP.download_file(&file, &|progress| {
+async fn download_file<R: Runtime>(window: Window<R>, file: File, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.download_file(&file, course.as_ref(), &|progress| {
         let _ = window.emit("download://progress", progress);
     })
     .await
@@ -810,8 +867,8 @@ async fn download_my_file_as_pdf(file: File, folder_path: String) -> Result<()> 
 }
 
 #[tauri::command]
-async fn save_file_content(content: Vec<u8>, file_name: String) -> Result<()> {
-    APP.save_file_content(&content, &file_name).await
+async fn save_file_content(content: Vec<u8>, file_name: String, course: Option<utils::download::DownloadCourse>) -> Result<()> {
+    APP.save_file_content(&content, &file_name, course.as_ref()).await
 }
 
 #[tauri::command]
@@ -848,7 +905,8 @@ async fn get_colors() -> Result<Colors> {
 
 #[tauri::command]
 async fn save_config(config: AppConfig) -> Result<()> {
-    tracing::debug!("Configuration update received");
+    diagnostics::protect_config(&config);
+    tracing::info!("Saving application configuration");
     APP.save_config(config).await
 }
 
@@ -1086,9 +1144,10 @@ async fn download_video<R: Runtime>(
     window: Window<R>,
     video: VideoPlayInfo,
     save_name: String,
+    course: Option<utils::download::DownloadCourse>,
 ) -> Result<()> {
     let window = Arc::new(window);
-    APP.download_video(&video, &save_name, move |progress| {
+    APP.download_video(&video, &save_name, course.as_ref(), move |progress| {
         let _ = window.clone().emit("video_download://progress", progress);
     })
     .await
@@ -1249,66 +1308,18 @@ fn save_system_settings(app: tauri::AppHandle, settings: SystemSettings) -> Resu
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // File logging must never prevent the application from starting. This can
-    // fail when another process temporarily holds the file or the directory is
-    // read-only (for example in a sandbox), so retain stdout logging as a
-    // reliable fallback and report the degraded state there.
-    let log_dir = App::config_dir()?;
-    let rotation_result = rotate_log_if_oversized(&log_dir);
-    let max_log_level = if cfg!(debug_assertions) {
-        Level::DEBUG
-    } else {
-        Level::WARN
-    };
-    let (file_layer, file_log_error) =
-        match tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::NEVER)
-            .filename_prefix("app.log")
-            .build(&log_dir)
-        {
-            Ok(appender) => (
-                Some(
-                    fmt::Layer::new()
-                        .with_writer(appender.with_max_level(max_log_level))
-                        .with_ansi(false)
-                        .compact(),
-                ),
-                None,
-            ),
-            Err(error) => (None, Some(error.to_string())),
-        };
-    let subscriber = tracing_subscriber::registry()
-        .with(
-            fmt::Layer::new()
-                .with_writer(std::io::stdout.with_max_level(max_log_level))
-                .pretty(),
-        )
-        .with(file_layer);
-    if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
-        eprintln!("Unable to install tracing subscriber: {error}");
+    let log_directory = App::config_dir().map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("SJTU-Canvas-Helper"));
+    diagnostics::init(log_directory);
+    if let Err(error) = APP.init().await {
+        tracing::error!(error = %error, "Application initialization failed");
+        return Err(error);
     }
-    if let Some(error) = file_log_error {
-        tracing::warn!(
-            log_dir = %log_dir,
-            %error,
-            "File logging unavailable; continuing with console logging"
-        );
-    } else {
-        tracing::info!(log_dir = %log_dir, "File logging initialized");
-    }
-    match rotation_result {
-        Ok(true) => tracing::info!("Oversized diagnostic log rotated"),
-        Ok(false) => {}
-        Err(error) => tracing::warn!(
-            error = %diagnostics::sanitize_text(&error.to_string()),
-            fallback = "continue_with_existing_log",
-            "Diagnostic log rotation failed"
-        ),
-    }
-
-    APP.init().await?;
     if APP.get_config().await.mcp_enabled {
-        APP.start_mcp().await?;
+        if let Err(error) = APP.start_mcp().await {
+            tracing::error!(error = %error, "MCP initialization failed");
+            return Err(error);
+        }
     }
     let initial_system_settings = App::read_system_settings().unwrap_or_default();
     CLOSE_TO_TRAY.store(
@@ -1325,7 +1336,16 @@ async fn main() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             release_update::check_release_update,
             release_update::install_release_update,
+            get_video_subtitle_versions,
+            inspect_video_recording,
+            proofread_video_subtitles,
+            reset_video_subtitle_proofread,
+            transcribe_video_material,
+            app_data,
             read_log_content,
+            read_diagnostic_report,
+            save_diagnostic_report,
+            open_log_directory,
             frontend_log,
             console_log,
             is_ffmpeg_installed,
@@ -1357,6 +1377,7 @@ async fn main() -> Result<()> {
             check_attendance_python,
             scan_attendance_once,
             sign_attendance_url,
+            scan_course_qrcodes,
             get_single_course_assignment_submission,
             export_excel,
             list_folder_files,
@@ -1386,6 +1407,8 @@ async fn main() -> Result<()> {
             delete_file_with_name,
             delete_path_file,
             save_path_file,
+            download_directory,
+            downloaded_files,
             delete_course_file,
             delete_my_file,
             download_file,
