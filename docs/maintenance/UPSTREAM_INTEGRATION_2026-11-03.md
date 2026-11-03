@@ -40,5 +40,6 @@
 - `node --test script/check-rust.node-test.mjs`：2 项脚本测试通过。
 - `git -c core.whitespace=cr-at-eol diff --cached --check`：通过；`git ls-files -u` 为空，冲突全部消除。`git ls-files 'scripts/*'` 为空，脚本目录迁移完成。
 - `yarn build:preview:local`：通过，包含 `tsc`、Vite 生产前端打包及 Tauri debug 无安装包构建。预览程序：`H:\Daily_project_vault\SJTU-Canvas-Helper-fancy\local-preview\20261103-181556\SJTU Canvas Helper.exe`（92,997,632 字节，SHA-256 `e1491d4b29fbd7f1d7cc28fb12c0fbe6b40bae05beb7788594909a6dc131d6fa`，与同目录 `SHA256SUMS.txt` 一致）。构建未创建 GitHub Release。
+- 隔离启动检查：将预览程序复制到临时目录，以便携配置启动，进程持续运行 8 秒；随后结束进程并清理临时副本和配置。未使用现有用户账号进行登录或远端服务联调。
 
 修复过程：首次 Rust 全量测试暴露 PPT 图片 401 错误序列化时泄漏签名 URL，已在 `AppError` 返回前统一脱敏并通过复测。首次前端全量测试暴露新增设置页测试对 MUI 禁用属性断言错误，调整为检查 `aria-disabled` 后全量通过。首次预览编译发现合并后的 Debug 页 JSX 标签拼写错误，已修正并重新通过 TypeScript 检查。
