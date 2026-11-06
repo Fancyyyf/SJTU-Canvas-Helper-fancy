@@ -4,14 +4,19 @@ import { AppConfig, TermSelection } from "./model";
 const TERM_FILTER_STORAGE_KEY = "canvas-helper.selected-term";
 const SIDEBAR_ITEMS_STORAGE_KEY = "canvas-helper.sidebar-items";
 const SUBTITLE_ARCHIVE_NAV_MIGRATION_KEY = "canvas-helper.subtitle-archive-nav-added";
+const GUIDE_NAV_MIGRATION_KEY = "canvas-helper.guide-nav-added";
+const STUDY_NAV_MIGRATION_KEY = "canvas-helper.study-nav-added";
 
 export const DEFAULT_SIDEBAR_ITEM_KEYS = [
     "agent",
+    "guide",
     "attendance",
     "files",
     "assignments",
     "discussions",
     "calendar",
+    "todo",
+    "web-search",
     "users",
     "grades",
     "submissions",
@@ -55,6 +60,17 @@ function readStoredSidebarItems(): string[] {
             localStorage.setItem(SIDEBAR_ITEMS_STORAGE_KEY, JSON.stringify(keys));
             localStorage.setItem(SUBTITLE_ARCHIVE_NAV_MIGRATION_KEY, "true");
         }
+        if (localStorage.getItem(GUIDE_NAV_MIGRATION_KEY) !== "true") {
+            if (!keys.includes("guide")) keys.splice(Math.min(1, keys.length), 0, "guide");
+            localStorage.setItem(SIDEBAR_ITEMS_STORAGE_KEY, JSON.stringify(keys));
+            localStorage.setItem(GUIDE_NAV_MIGRATION_KEY, "true");
+        }
+        if (localStorage.getItem(STUDY_NAV_MIGRATION_KEY) !== "true") {
+            for (const item of ["todo", "web-search"]) if (!keys.includes(item)) keys.push(item);
+            localStorage.setItem(SIDEBAR_ITEMS_STORAGE_KEY, JSON.stringify(keys));
+            localStorage.setItem(STUDY_NAV_MIGRATION_KEY, "true");
+        }
+        if (parsed.length !== keys.length) localStorage.setItem(SIDEBAR_ITEMS_STORAGE_KEY, JSON.stringify(keys));
         return keys;
     } catch {
         return DEFAULT_SIDEBAR_ITEM_KEYS;

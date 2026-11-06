@@ -1057,6 +1057,7 @@ mod tests {
             handle: Default::default(),
             mcp_handle: Default::default(),
             cache: Default::default(),
+            health: Default::default(),
             attendance_handle: Default::default(),
             attendance_status: Default::default(),
         }

@@ -41,12 +41,13 @@ beforeEach(() => {
     theme: "light", color_primary: "#00b96b", compact_mode: false, mcp_enabled: false, mcp_port: 3100, debug_mode: false,
   };
   mocks.getConfig.mockImplementation(async () => structuredClone(config));
-  mocks.saveConfig.mockResolvedValue(undefined);
+  mocks.saveConfig.mockImplementation(async (nextConfig: AppConfig) => structuredClone(nextConfig));
   mocks.validatePath.mockResolvedValue(undefined);
   mocks.open.mockResolvedValue("D:\\Selected");
   mocks.invoke.mockImplementation(async (command: string, args?: { request?: { op: string } }) => {
     if (command === "list_accounts") return ["Default", "Study"];
     if (command === "read_account_info") return { current_account: "Default" };
+    if (command === "credential_status") return { state: "ready", message: "凭据已就绪" };
     if (command === "get_system_settings") return { auto_start: false, close_behavior: "minimize_to_tray" };
     if (command === "check_extra_login_status") return true;
     if (command === "get_raw_config") return JSON.stringify({ theme: "light" });
@@ -62,6 +63,23 @@ async function openSettings() {
 }
 function section(name: string) { fireEvent.click(screen.getByRole("tab", { name })); }
 function save() { fireEvent.click(screen.getAllByRole("button", { name: "保存全部设置" })[0]); }
+
+it("does not offer credential reset while the system store is unavailable", async () => {
+  const defaultInvoke = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args?: { request?: { op: string } }) =>
+    command === "credential_status" ? { state: "unavailable", message: "系统凭据库暂时不可用" } : defaultInvoke(command, args));
+  await openSettings();
+  expect(await screen.findByText(/系统凭据库暂时不可用/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "重新登录" })).not.toBeInTheDocument();
+});
+
+it("offers explicit recovery when the credential entry is missing", async () => {
+  const defaultInvoke = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args?: { request?: { op: string } }) =>
+    command === "credential_status" ? { state: "missing", message: "凭据条目缺失" } : defaultInvoke(command, args));
+  await openSettings();
+  expect(await screen.findByRole("button", { name: "重新登录" })).toBeVisible();
+});
 
 it("keeps the footer save status across categories and failed saves, then clears it on success", async () => {
   await openSettings();

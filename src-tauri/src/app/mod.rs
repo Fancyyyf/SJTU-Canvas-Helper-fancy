@@ -13,6 +13,12 @@ pub mod data;
 pub mod downloads;
 mod qrcode;
 pub mod cache;
+mod credentials;
+pub mod health;
+pub mod snapshot;
+pub mod timetable;
+pub mod web_search;
+pub mod pi_agent;
 mod constants;
 pub mod jbox;
 pub mod video;
@@ -31,6 +37,7 @@ pub struct App {
     attendance_handle: RwLock<Option<JoinHandle<()>>>,
     attendance_status: RwLock<crate::model::AttendanceWatchStatus>,
     cache: Cache,
+    health: RwLock<std::collections::BTreeMap<String, health::HealthDomain>>,
 }
 
 #[cfg(test)]

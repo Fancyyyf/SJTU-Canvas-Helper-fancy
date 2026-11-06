@@ -1,4 +1,4 @@
-use axum::{Router, response::Json};
+use axum::{Router, extract::{Request, State}, http::{StatusCode, header::{HOST, ORIGIN}}, middleware::{self, Next}, response::{IntoResponse, Json, Response}};
 use rmcp::{
     ErrorData, ServerHandler,
     handler::server::wrapper::Parameters,
@@ -17,11 +17,40 @@ use std::net::SocketAddr;
 
 use crate::{model::File, APP};
 
+fn local_authority(value: &str, port: u16) -> bool {
+    value.eq_ignore_ascii_case(&format!("127.0.0.1:{port}"))
+        || value.eq_ignore_ascii_case(&format!("localhost:{port}"))
+}
+
+fn allowed_origin(value: &str, port: u16) -> bool {
+    let Ok(origin) = tauri::Url::parse(value) else { return false; };
+    if !matches!(origin.path(), "" | "/") || origin.query().is_some() || origin.fragment().is_some() { return false; }
+    let host = origin.host_str().unwrap_or_default();
+    match origin.scheme() {
+        "http" => (host == "localhost" || host == "127.0.0.1") && origin.port() == Some(port)
+            || host == "tauri.localhost" && origin.port().is_none(),
+        "https" => host == "tauri.localhost" && origin.port().is_none(),
+        "tauri" => host == "localhost" && origin.port().is_none(),
+        _ => false,
+    }
+}
+
+async fn local_request_only(State(port): State<u16>, request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    let host_allowed = headers.get(HOST).and_then(|value| value.to_str().ok()).is_some_and(|value| local_authority(value, port));
+    let origin_allowed = headers.get(ORIGIN).map(|value| value.to_str().ok().is_some_and(|value| allowed_origin(value, port))).unwrap_or(true);
+    if !host_allowed || !origin_allowed { return StatusCode::FORBIDDEN.into_response(); }
+    next.run(request).await
+}
+
 #[derive(Clone)]
 struct McpServer;
 
-fn internal(e: impl ToString) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+fn internal(e: crate::error::AppError) -> ErrorData {
+    ErrorData::internal_error(
+        crate::diagnostics::sanitize_text(&e.to_string()),
+        Some(json!({"code": e.code()})),
+    )
 }
 
 fn invalid(e: impl ToString) -> ErrorData {
@@ -65,6 +94,44 @@ impl McpServer {
     #[tool(description = "List all courses for the current Canvas user")]
     async fn list_courses(&self) -> Result<CallToolResult, ErrorData> {
         APP.list_courses().await.map(tool_json).map_err(internal)
+    }
+
+    #[tool(description = "Read a bounded course snapshot with assignment and file metadata; signed download URLs are excluded")]
+    async fn course_snapshot(
+        &self,
+        Parameters(params): Parameters<Map<String, Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let course_id = get_i64(&params, "course_id")?;
+        let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50);
+        if !(1..=100).contains(&limit) { return Err(invalid("limit must be between 1 and 100")); }
+        let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        if offset > 10_000 { return Err(invalid("offset must be at most 10000")); }
+        let course = APP.list_courses().await.map_err(internal)?.into_iter()
+            .find(|course| course.id == course_id)
+            .ok_or_else(|| invalid("course_id is not in the current account"))?;
+        let (assignments, files) = tokio::join!(APP.snapshot_assignments(course_id), APP.snapshot_files(course_id));
+        let mut errors = Vec::new();
+        let assignments = match assignments {
+            Ok(items) => items,
+            Err(error) => { errors.push(json!({"resource": "assignments", "code": error.code()})); Vec::new() },
+        };
+        let files = match files {
+            Ok(items) => items,
+            Err(error) => { errors.push(json!({"resource": "files", "code": error.code()})); Vec::new() },
+        };
+        let assignment_count = assignments.len();
+        let file_count = files.len();
+        Ok(tool_json(json!({
+            "course": {"id": course.id, "name": course.name, "courseCode": course.course_code, "term": {"id": course.term.id, "name": course.term.name}},
+            "assignments": assignments.into_iter().skip(offset as usize).take(limit as usize).collect::<Vec<_>>(),
+            "files": files.into_iter().skip(offset as usize).take(limit as usize).collect::<Vec<_>>(),
+            "counts": {"assignments": assignment_count, "files": file_count},
+            "truncated": assignment_count > (offset + limit) as usize || file_count > (offset + limit) as usize,
+            "offset": offset, "limit": limit,
+            "partialErrors": errors,
+            "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "cacheTtlSeconds": {"courses": 86400, "assignments": 300, "files": 3600}
+        })))
     }
 
     #[tool(description = "Get the current user's profile information")]
@@ -370,7 +437,8 @@ pub fn start_mcp_server(port: u16) -> tokio::task::JoinHandle<()> {
                 "/health",
                 axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
             )
-            .fallback_service(service);
+            .fallback_service(service)
+            .layer(middleware::from_fn_with_state(port, local_request_only));
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr)
@@ -384,4 +452,22 @@ pub fn start_mcp_server(port: u16) -> tokio::task::JoinHandle<()> {
             .await
             .expect("MCP server failed");
     })
+}
+
+#[cfg(test)]
+mod local_access_tests {
+    use super::{allowed_origin, local_authority};
+
+    #[test]
+    fn rejects_remote_host_and_browser_origin() {
+        assert!(local_authority("localhost:3100", 3100));
+        assert!(local_authority("127.0.0.1:3100", 3100));
+        assert!(!local_authority("evil.example:3100", 3100));
+        assert!(!local_authority("localhost:3100.evil.example", 3100));
+        assert!(allowed_origin("tauri://localhost", 3100));
+        assert!(allowed_origin("http://localhost:3100", 3100));
+        assert!(!allowed_origin("https://evil.example", 3100));
+        assert!(!allowed_origin("http://localhost:3100.evil.example", 3100));
+    }
+
 }

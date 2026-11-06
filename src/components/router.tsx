@@ -5,6 +5,8 @@ import AttendancePage from "../page/attendance";
 import CanvasAgentPage from "../page/agent";
 import AssignmentsPage from "../page/assignments";
 import CalendarPage from "../page/calendar";
+import TodoPage from "../page/todo";
+import WebSearchPage from "../page/web_search";
 import DebugPage from "../page/debug";
 import DiscussionsPage from "../page/discussions";
 import FilesPage from "../page/files";
@@ -18,16 +20,21 @@ import UsersPage from "../page/users";
 import VideoPage from "../page/video";
 import SubtitleArchivePage from "../page/subtitle_archive";
 import HomePage from "../page/home";
+import GuidePage from "../page/guide";
 import RetainedVideoWorkspace from "./retained_video_workspace";
 
 // 路由配置对象
 const routesConfig = [
     { path: "/home", element: <HomePage /> },
+    { path: "/guide", element: <GuidePage /> },
     { path: "/agent", element: <CanvasAgentPage /> },
     { path: "/attendance", element: <AttendancePage /> },
     { path: "/annual", element: <AnnualPage /> },
     { path: "/assignments", element: <AssignmentsPage /> },
     { path: "/calendar", element: <CalendarPage /> },
+    { path: "/timetable", element: <Navigate to="/calendar" replace /> },
+    { path: "/todo", element: <TodoPage /> },
+    { path: "/web-search", element: <WebSearchPage /> },
     { path: "/debug", element: <DebugPage /> },
     { path: "/discussions", element: <DiscussionsPage /> },
     { path: "/files", element: <FilesPage /> },

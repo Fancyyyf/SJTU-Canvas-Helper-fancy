@@ -9,6 +9,9 @@ import { AppMessageProvider } from "./lib/message";
 import { UpdateNoticeProvider } from "./lib/update_notice";
 import { useAppZoom } from "./lib/app_zoom";
 import { syncCanvasCalendar } from "./lib/canvas_calendar_cache";
+import { invoke } from "@tauri-apps/api/core";
+import { checkTodoReminders } from "./lib/todo_reminders";
+import { syncTodos } from "./lib/todo";
 
 const FONT_DISPLAY =
   '"Iowan Old Style", "Palatino Linotype", "Georgia", "STZhongsong", "SimSun", "Songti SC", serif';
@@ -18,6 +21,27 @@ const FONT_BODY =
 function App() {
   useAppZoom();
   useEffect(() => { void syncCanvasCalendar(); }, []);
+  useEffect(() => {
+    let active = true;
+    const tick = async () => {
+      try {
+        const info = await invoke<{ current_account: string }>("read_account_info");
+        if (!active) return;
+        const account = info.current_account || "local";
+        await checkTodoReminders(account);
+      } catch { /* Background reminders must not interrupt the app. */ }
+    };
+    const initial = async () => {
+      try {
+        const info = await invoke<{ current_account: string }>("read_account_info");
+        if (active) await syncTodos(info.current_account || "local");
+      } catch { /* A later manual sync remains available. */ }
+      if (active) await tick();
+    };
+    void initial();
+    const timer = window.setInterval(() => { void tick(); }, 5 * 60 * 1000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
   const config = useConfigSelector((state) => state.config.data);
 
   const muiTheme = useMemo(() => {

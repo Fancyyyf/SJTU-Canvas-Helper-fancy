@@ -7,9 +7,7 @@ import urllib.parse
 from typing import Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-import ddddocr
 import requests
-from bs4 import BeautifulSoup
 
 # 保留原项目的配置入口；桌面应用运行时会优先通过环境变量传入配置。
 USERNAME = ""
@@ -140,6 +138,9 @@ def _session_from_password(
     risk_delay_ms: int,
     log: Callable[[str], None],
 ) -> Tuple[requests.Session, str]:
+    import ddddocr
+    from bs4 import BeautifulSoup
+
     ocr = ddddocr.DdddOcr(show_ad=False)
     last_error = ""
 
@@ -312,6 +313,50 @@ def auto_sign(
         }
 
 
+def read_course_attendance(
+    course_id: int,
+    kind: str,
+    ja_auth_cookie: Optional[str] = None,
+    page_num: int = 1,
+    page_size: int = 50,
+) -> Dict[str, object]:
+    """Read the current user's roll-call status or records; never submit a sign-in."""
+    if course_id <= 0 or kind not in {"status", "records"}:
+        raise ValueError("课程 ID 或查询类型无效")
+    if not 1 <= page_num <= 1000 or not 1 <= page_size <= 100:
+        raise ValueError("签到记录分页参数超出范围")
+    cookie = ja_auth_cookie or os.getenv("SJTU_ATTENDANCE_JA_AUTH_COOKIE", "")
+    if not cookie.strip():
+        raise RuntimeError("请先在系统设置完成额外扫码登录，再查询签到状态或记录")
+    # Landing on this URL establishes the mLearning Access_Token via jAccount SSO.
+    # No sign/scan endpoint is contacted by this read-only path.
+    probe_url = f"{MLEARNING_ORIGIN}{QR_PATH}?rollCallToken=probe&signHistoryId=probe"
+    if kind == "status":
+        path = f"/lms-lti-rollcall-sjtu/rollcall/existentB?courseCode={course_id}"
+    else:
+        path = (
+            f"/lms-lti-rollcall-sjtu/sign/records?courseCode={course_id}"
+            f"&pageNum={page_num}&pageSize={page_size}"
+        )
+    for attempt in range(2):
+        session, token = _session_from_cookie(probe_url, cookie.strip())
+        if not token:
+            raise RuntimeError("mLearning 登录态已失效，请重新扫码登录")
+        response = session.get(
+            f"{MLEARNING_ORIGIN}{path}",
+            headers={"Authorization": token, "Referer": f"{MLEARNING_ORIGIN}/lms/mobile/"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if str(result.get("resultCode", "")) == "10001":
+            if attempt == 0:
+                continue
+            raise RuntimeError("mLearning 登录态已失效，请重新扫码登录")
+        return {"courseId": course_id, "kind": kind, "pageNum": page_num, "pageSize": page_size, "data": result}
+    raise RuntimeError("签到查询失败")
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description="SJTU 课堂签到 Python 模块")
     parser.add_argument(
@@ -320,7 +365,19 @@ def _main() -> int:
         help="完整的 mLearning 签到二维码链接（也可使用 SJTU_ATTENDANCE_URL）",
     )
     parser.add_argument("--json", action="store_true", help="仅在 stdout 输出最终 JSON 结果")
+    parser.add_argument("--attendance-read", choices=["status", "records"])
+    parser.add_argument("--course-id", type=int, default=0)
+    parser.add_argument("--page-num", type=int, default=1)
+    parser.add_argument("--page-size", type=int, default=50)
     args = parser.parse_args()
+    if args.attendance_read:
+        try:
+            result = read_course_attendance(args.course_id, args.attendance_read, page_num=args.page_num, page_size=args.page_size)
+            print(json.dumps({"kind": "attendance-read", **result}, ensure_ascii=False), flush=True)
+            return 0
+        except (ValueError, RuntimeError, requests.RequestException, json.JSONDecodeError) as error:
+            print(json.dumps({"kind": "attendance-read", "error": str(error)}, ensure_ascii=False), flush=True)
+            return 1
     result = auto_sign(args.url, logger=None if args.json else print)
     if args.json:
         print(json.dumps({"kind": "result", **result}, ensure_ascii=False), flush=True)

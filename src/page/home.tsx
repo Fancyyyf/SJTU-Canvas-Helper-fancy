@@ -16,6 +16,7 @@ import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import SmartDisplayRoundedIcon from "@mui/icons-material/SmartDisplayRounded";
 import TimelineRoundedIcon from "@mui/icons-material/TimelineRounded";
 import DashboardCustomizeRoundedIcon from "@mui/icons-material/DashboardCustomizeRounded";
+import MenuBookRoundedIcon from "@mui/icons-material/MenuBookRounded";
 import {
   Alert,
   Avatar,
@@ -41,6 +42,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import BasicLayout from "../components/layout";
+import { FeatureTourDialog } from "../components/feature_tour_dialog";
 import { WorkspaceHero } from "../components/workspace_hero";
 import {
   useAllCourses,
@@ -82,15 +84,27 @@ const featureEntries = [
   },
   {
     title: "日程管理",
-    description: "集中查看当前学期范围内的课程事件和截止日期。",
+    description: "合并查看正式课表、个人日程与作业截止时间。",
     path: "/calendar",
     icon: <CalendarMonthRoundedIcon />,
+  },
+  {
+    title: "TODO 与提醒",
+    description: "合并个人待办与 Canvas 作业，查看状态和到期提醒。",
+    path: "/todo",
+    icon: <AssignmentRoundedIcon />,
   },
   {
     title: "视频管理",
     description: "播放课程视频、查看字幕、下载视频和课件。",
     path: "/video",
     icon: <SmartDisplayRoundedIcon />,
+  },
+  {
+    title: "字幕工作台",
+    description: "检索、整理并归档课程视频字幕。",
+    path: "/subtitle-archive",
+    icon: <AutoStoriesRoundedIcon />,
   },
   {
     title: "讨论管理",
@@ -135,6 +149,12 @@ const featureEntries = [
     icon: <TimelineRoundedIcon />,
   },
   {
+    title: "网页搜索",
+    description: "使用自己的 Brave Search API Key 搜索网页。",
+    path: "/web-search",
+    icon: <ForumRoundedIcon />,
+  },
+  {
     title: "系统设置",
     description: "管理 Canvas Token、登录态、下载目录和外观设置。",
     path: "/settings",
@@ -149,6 +169,7 @@ export default function HomePage() {
     (state) => state.navigation.visibleItemKeys
   );
   const [customizeSidebarOpen, setCustomizeSidebarOpen] = useState(false);
+  const [featureTourOpen, setFeatureTourOpen] = useState(false);
   const allCourses = useAllCourses();
   const me = useMe();
   const { selectedTermId, setSelectedTermId, terms } = useTermFilter(
@@ -198,6 +219,8 @@ export default function HomePage() {
             me.data?.name ? `，${me.data.name}` : "使用 Canvas Helper"
           }`}
           description="从这里选择本次浏览的学期范围。课程、作业、文件、视频、成绩等页面会同步使用同一筛选。"
+          footer={<Button variant="outlined" startIcon={<MenuBookRoundedIcon />}
+            onClick={() => setFeatureTourOpen(true)}>功能使用指南</Button>}
           stats={[
             { label: "当前范围课程", value: scopedCourses.length },
             { label: "可选学期", value: terms.length },
@@ -434,6 +457,8 @@ export default function HomePage() {
           </Box>
         </Box>
       </Stack>
+
+      <FeatureTourDialog open={featureTourOpen} onClose={() => setFeatureTourOpen(false)} />
 
       <Dialog
         open={customizeSidebarOpen}

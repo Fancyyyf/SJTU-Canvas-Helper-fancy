@@ -51,6 +51,12 @@ SJTU Canvas 小帮手基于 [Tauri](https://tauri.app/) 开发，助您更便捷
 
 “字幕工作台”位于左侧边栏。原始字幕可以直接阅读、检索和复制；页面会将资料整理到设置中的下载目录：`字幕工作台/<课程>/01_原始JSON` 保存未改动的接口 JSON，`02_提取TXT` 保存提取的字幕，`03_Agent整理/01_字幕清理` 和 `03_Agent整理/02_知识点整理` 保存两种 Agent 结果。点击“打开 Agent 小窗口”可对当前课次或整门课逐节处理。字幕清理会按标点和长度切块，删除无意义口头语并保留原意；知识点整理可选择原始 TXT 或已清理的字幕，后者未生成时不可选。每块都独立调用与 Canvas Agent 相同配置的模型接口，代码负责逐课循环、拼接结果。两个模式的提示词可在窗口编辑，也可直接修改 `字幕工作台/prompts` 下的 Markdown 文件。抓取新课程时，先在设置页完成额外登录，再在工作台加载视频课程、选择课程并输入文件名前缀；系统会拉取该课程所有已上过的课次，抓取中断后使用同一前缀可继续。
 
+左侧新增“使用教程”，集中说明桌面功能、AI/MCP、只读 CLI 与项目技术结构。AI 可阅读 [项目 skill](skills/sjtu-canvas-helper/SKILL.md)；命令行先在系统设置开启 MCP Server 并保持应用运行，再执行 `yarn canvas:cli health`、`yarn canvas:cli tools` 或 `yarn canvas:cli call list_courses`。CLI 只调用只读工具，参数和安全边界见 [CLI 参考](skills/sjtu-canvas-helper/references/cli.md)。终端交互先使用 JSON CLI；TUI 暂不接入。
+
+Agent 页面可选择“自配 Agent（内置）”或“Pi Agent”。Pi 使用设置中当前选中的模型、接口地址和 API Key，并在对话窗口保留上下文；切换引擎不会混合聊天记录。Pi 模式需本机安装 `pi` 命令，目前只读取当前账号的日历与 TODO 快照。点击“新建对话”可清空当前引擎的聊天窗口。
+
+“日程管理”已包含教学信息服务网课表。完成 jAccount 登录后，在日程页选择学年和学期并导入；课表按账号保存在本机，可离线查看。重新拉取时会记录尝试和成功时间，内容一致则保留本地记录，变化时更新课程；个人日程和作业时间不受课表更新影响。
+
 ![](./images/settings.png)
 
 ## 致谢
@@ -203,7 +209,7 @@ python/attendance/
 
 Rust/Tauri 只负责查找解释器、启动或停止 Python 子进程、传入本机配置，并把事件同步到页面。签到 URL、密码和 Cookie 通过子进程环境变量传入，不会写进 Python 源码或命令行参数。`nn.py` 仍直接调用 `surveil.py` 的 `auto_sign`，因此这套目录也可以脱离桌面应用独立运行。
 
-密码登录为可选功能。启用后，学号和密码会保存在当前账号对应的本机应用配置文件中，只用于向上海交通大学 jAccount 登录接口提交；请勿在共享设备中启用。关闭密码登录回退并保存会清除已存学号和密码。验证码图片由 `ddddocr` 在本机识别，不上传第三方服务；屏幕图像同样只在本机内存中进行二维码识别，不保存、不上传，也不会发送给 LLM。调试日志会脱敏 Cookie、Authorization 等敏感请求头，设置页显示原始配置时也会隐藏密码和令牌。
+密码登录为可选功能。启用后，密码与 Canvas Token、Cookie、LLM API Key、可能带签名 URL 的课程作业绑定文件等敏感字段存入当前系统用户的凭据库，账号 JSON 仅保留引用；旧版明文账号配置在首次读取时逐个迁移，写入并读回校验成功后才替换文件。若凭据库暂时不可用，设置页会提示重试；确需重新登录时可显式清除当前账号的凭据引用。关闭密码登录回退并保存会清除已存学号和密码。验证码图片由 `ddddocr` 在本机识别，不上传第三方服务；屏幕图像同样只在本机内存中进行二维码识别，不保存、不上传，也不会发送给 LLM。调试日志会脱敏 Cookie、Authorization 等敏感请求头，设置页配置预览也会隐藏密码和令牌。
 
 #### Python 环境
 
@@ -444,7 +450,7 @@ yarn dev
 | macOS | `~/Library/Application Support/SJTU-Canvas-Helper/` |
 | Linux | `~/.config/SJTU-Canvas-Helper/` |
 
-便携模式会在可执行文件旁查找 `.config/PORTABLE`，存在时把配置和日志保存在同一个 `.config/` 目录。配置可能包含 Canvas Token、Cookie 或密码，不要提交到 Git、公开 Issue 或构建产物中。
+便携模式会在可执行文件旁查找 `.config/PORTABLE`，存在时把配置和日志保存在同一个 `.config/` 目录。凭据仍保存在当前系统用户的凭据库；将便携目录移到另一设备后需要重新登录。迁移前的旧配置文件可能包含明文秘密，仍不要将配置目录提交到 Git、公开 Issue 或构建产物。普通应用数据备份不包含系统凭据。课程摘要的作业和文件安全元数据可写入加密的 `metadata-cache-v1/`，加密密钥由当前 Canvas Token 派生；Token 变化或缓存过期后不会复用旧缓存。请定期清理旧版明文配置的外部备份。
 
 ### 6. 开发与调试
 
@@ -482,15 +488,17 @@ yarn tauri info
 提交前建议依次运行：
 
 ```shell
-yarn lin
+yarn lint
 yarn typecheck
-yarn tes
+yarn test
 yarn build
 
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --all-features
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+日常迭代可先做增量检查：`yarn check:rust:fast` 运行 `cargo check --tests`，`yarn test:rust:focused app::cache::tests` 只执行匹配的 Rust 测试。Cargo 默认复用 `src-tauri/target`，首次编译仍需构建测试二进制，后续改动才明显变快；不要在每次测试前清理 target 或切换 `CARGO_TARGET_DIR`。合并前再运行完整 Rust 门禁 `yarn check:rust`。CLI 协议测试使用 `yarn test:cli`。
 
 Python 模块检查：
 

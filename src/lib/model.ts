@@ -303,6 +303,9 @@ export interface LlmApiKeyEntry {
 }
 
 export interface AppConfig {
+    credential_ref?: string;
+    credential_chunks?: number;
+    credential_version?: number;
     token: string;
     account_type: "Default" | "JI";
     save_path: string;

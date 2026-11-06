@@ -124,6 +124,11 @@ export default function AttendancePage() {
   const [events, setEvents] = useState<AttendanceEventPayload[]>([]);
   const [intervalMs, setIntervalMs] = useState(1_000);
   const [manualUrl, setManualUrl] = useState("");
+  const [lookupCourseId, setLookupCourseId] = useState("");
+  const [lookupKind, setLookupKind] = useState<"status" | "records">("status");
+  const [lookupPage, setLookupPage] = useState(1);
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupResult, setLookupResult] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [manualBusy, setManualBusy] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
@@ -394,6 +399,26 @@ export default function AttendancePage() {
     [status]
   );
 
+  const readAttendance = async () => {
+    const courseId = Number(lookupCourseId);
+    if (!Number.isSafeInteger(courseId) || courseId <= 0) {
+      messageApi.warning("请输入有效的课程数字 ID");
+      return;
+    }
+    setLookupBusy(true);
+    try {
+      const result = await invoke<{ data: unknown }>("read_course_attendance", {
+        courseId, kind: lookupKind, pageNum: lookupPage, pageSize: 50,
+      });
+      setLookupResult(result.data);
+    } catch (error) {
+      setLookupResult(null);
+      messageApi.error(`签到查询失败：${error}`);
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
   return (
     <BasicLayout>
       <Stack spacing={3}>
@@ -412,6 +437,22 @@ export default function AttendancePage() {
           }
           stats={statusStats}
         />
+
+        <SurfaceCard>
+          <Stack spacing={1.5}>
+            <Typography variant="h6">课程签到状态与本人记录</Typography>
+            <Typography variant="body2" color="text.secondary">使用系统设置中的额外扫码登录态，只读取 mLearning 数据，不会提交签到。课程 ID 可从 Canvas 课程页面 URL 获取；接口原始结果仅在本机显示。</Typography>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+              <TextField size="small" label="课程 ID" value={lookupCourseId} onChange={(event) => setLookupCourseId(event.target.value)} inputProps={{ inputMode: "numeric" }} />
+              <Select size="small" value={lookupKind} onChange={(event) => { setLookupKind(event.target.value as "status" | "records"); setLookupResult(null); }} aria-label="签到查询类型">
+                <MenuItem value="status">当前状态</MenuItem><MenuItem value="records">本人记录</MenuItem>
+              </Select>
+              {lookupKind === "records" && <TextField size="small" label="页码" type="number" value={lookupPage} onChange={(event) => setLookupPage(Math.max(1, Math.min(1000, Number(event.target.value) || 1)))} inputProps={{ min: 1, max: 1000 }} sx={{ width: 100 }} />}
+              <Button variant="contained" disabled={lookupBusy} onClick={readAttendance}>查询</Button>
+            </Stack>
+            {lookupResult !== null && <Box component="pre" sx={{ m: 0, p: 2, bgcolor: "action.hover", borderRadius: 2, overflow: "auto", maxHeight: 360, fontSize: 12 }}>{JSON.stringify(lookupResult, null, 2)}</Box>}
+          </Stack>
+        </SurfaceCard>
 
         {loginReady === false ? (
           <Alert severity="warning">

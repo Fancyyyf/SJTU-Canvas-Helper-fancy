@@ -64,6 +64,10 @@ pub enum AppError {
     AttendanceError(String),
     #[error("Calendar error: {0}")]
     CalendarError(String),
+    #[error("凭据存储错误：{0}")]
+    CredentialStore(String),
+    #[error("凭据缺失：{0}")]
+    CredentialMissing(String),
 }
 
 impl AppError {
@@ -96,6 +100,8 @@ impl AppError {
             Self::LLMError(_) => "LLM.OPERATION_FAILED",
             Self::AttendanceError(_) => "ATTENDANCE.OPERATION_FAILED",
             Self::CalendarError(_) => "CALENDAR.OPERATION_FAILED",
+            Self::CredentialStore(_) => "CREDENTIAL.STORE_UNAVAILABLE",
+            Self::CredentialMissing(_) => "CREDENTIAL.MISSING",
             Self::DocumentConversion(_) => "FILE.DOCUMENT_CONVERSION_FAILED",
             Self::FilePreview(_) => "FILE.PREVIEW_FAILED",
         }
@@ -119,6 +125,7 @@ impl AppError {
                 | Self::FunctionUnsupported
                 | Self::UnsupportedFileExtensionError(_)
                 | Self::CalendarError(_)
+                | Self::CredentialMissing(_)
         )
     }
 

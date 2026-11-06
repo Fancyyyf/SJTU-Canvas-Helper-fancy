@@ -193,6 +193,12 @@ pub struct LlmApiKeyEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
+    pub credential_ref: String,
+    #[serde(default)]
+    pub credential_chunks: usize,
+    #[serde(default)]
+    pub credential_version: u8,
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub save_path: String,
@@ -269,6 +275,9 @@ fn default_mcp_port() -> u16 {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            credential_ref: String::new(),
+            credential_chunks: 0,
+            credential_version: 0,
             token: Default::default(),
             save_path: Default::default(),
             account_type: Default::default(),

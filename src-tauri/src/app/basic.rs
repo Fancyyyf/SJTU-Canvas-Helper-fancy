@@ -35,6 +35,7 @@ use crate::{
 
 use super::{
     constants::{COURSES_CACHE_KEY, RELATIONSHIP_CACHE_KEY},
+    credentials::{self, OsCredentialStore},
     App,
 };
 
@@ -245,14 +246,13 @@ impl App {
             return Err(AppError::AccountNotExists);
         }
 
-        let config_path = App::get_config_path(account);
-        fs::remove_file(&config_path)?;
-
         let current_account = self.current_account.read().await.clone();
         // if delete current account, then switch to default
         if *account == current_account {
             self.switch_account(&Default::default()).await?;
         }
+        let config_path = App::get_config_path(account);
+        credentials::delete(Path::new(&config_path), &OsCredentialStore)?;
         let mut account_info = App::read_account_info()?;
         for i in 0..account_info.all_accounts.len() {
             if account_info.all_accounts[i] == *account {
@@ -266,6 +266,7 @@ impl App {
 
     fn invalidate_cache(&self) -> Result<()> {
         self.cache.clear()?;
+        super::cache::DiskCache::new(Path::new(&Self::config_dir()?)).clear()?;
         Ok(())
     }
 
@@ -274,7 +275,7 @@ impl App {
             return Err(AppError::AccountNotExists);
         }
         let config_path = App::get_config_path(account);
-        let config = App::read_config_from_file(&config_path)?;
+        let config = App::read_config_from_file(&config_path, account)?;
         crate::diagnostics::protect_config(&config);
         let base_url = Self::get_base_url(&config.account_type);
         self.client.set_base_url(base_url).await;
@@ -288,6 +289,7 @@ impl App {
         App::save_account_info(&account_info)?;
         *self.current_account.write().await = account.clone();
         self.invalidate_cache()?;
+        self.health.write().await.clear();
         // Restart MCP server if enabled (token may have changed)
         if self.config.read().await.mcp_enabled {
             self.restart_mcp().await?;
@@ -317,7 +319,7 @@ impl App {
         tracing::info!("Loaded current account configuration");
         let config_path = App::get_config_path(&account_info.current_account);
         tracing::info!("Read config path: {}", config_path);
-        let config = App::read_config_from_file(&config_path).unwrap_or_else(|error| {
+        let config = App::read_config_from_file(&config_path, &account_info.current_account).unwrap_or_else(|error| {
             tracing::warn!(error = %error, "Could not read configuration; using defaults");
             AppConfig::default()
         });
@@ -342,6 +344,7 @@ impl App {
             attendance_handle: Default::default(),
             attendance_status: Default::default(),
             cache: Default::default(),
+            health: Default::default(),
         }
     }
 
@@ -538,10 +541,14 @@ impl App {
         self.start_mcp().await
     }
 
-    fn read_config_from_file(config_path: &str) -> Result<AppConfig> {
-        let content = fs::read(config_path)?;
-        let config = utils::json::parse_json(&content)?;
-        Ok(config)
+    fn read_config_from_file(config_path: &str, account: &Account) -> Result<AppConfig> {
+        match credentials::load(Path::new(config_path), account, &OsCredentialStore) {
+            Ok(config) => Ok(config),
+            Err(error) => {
+                tracing::warn!(error = %error, "Credential load failed; loading public settings only");
+                credentials::load_without_secrets(Path::new(config_path))
+            }
+        }
     }
 
     fn get_config_path(account: &Account) -> String {
@@ -578,15 +585,63 @@ impl App {
     pub async fn get_raw_config(&self) -> Result<String> {
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
-        let content = fs::read_to_string(config_path)?;
-        Ok(content)
+        // Legacy files may still contain secrets if migration could not complete.
+        // The preview must never expose them.
+        let mut config = credentials::load_without_secrets(Path::new(&config_path))?;
+        // Bound files may contain short-lived signed URLs even though they are not credentials.
+        config.course_assignment_file_bindings.clear();
+        Ok(serde_json::to_string_pretty(&config)?)
+    }
+
+    pub async fn credential_status(&self) -> serde_json::Value {
+        let account = self.current_account.read().await.clone();
+        let path = App::get_config_path(&account);
+        match credentials::load(Path::new(&path), &account, &OsCredentialStore) {
+            Ok(loaded) => {
+                let current = self.config.read().await;
+                if !credentials::same_secrets(&loaded, &current) {
+                    serde_json::json!({ "state": "reload_required", "message": "系统凭据库已恢复，请重新读取账号凭据" })
+                } else if loaded.credential_ref.is_empty() {
+                    serde_json::json!({ "state": "ready", "message": "当前账号尚未配置凭据" })
+                } else {
+                    serde_json::json!({ "state": "ready", "message": "凭据已由系统凭据库管理" })
+                }
+            }
+            Err(error) => serde_json::json!({ "state": if matches!(error, AppError::CredentialMissing(_)) { "missing" } else { "unavailable" }, "message": error.to_string() }),
+        }
+    }
+
+    pub async fn retry_credential_load(&self) -> Result<()> {
+        let account = self.current_account.read().await.clone();
+        let path = App::get_config_path(&account);
+        credentials::load(Path::new(&path), &account, &OsCredentialStore)?;
+        self.switch_account(&account).await
+    }
+
+    pub async fn forget_credentials(&self) -> Result<()> {
+        let account = self.current_account.read().await.clone();
+        credentials::forget(Path::new(&App::get_config_path(&account)))?;
+        self.switch_account(&account).await
     }
 
     pub async fn list_courses(&self) -> Result<Vec<Course>> {
-        if let Some(cached_courses) = self.cache.get(COURSES_CACHE_KEY)? {
+        let key = self.courses_cache_key().await;
+        if let Some(cached_courses) = self.cache.get(&key)? {
             return Ok(cached_courses);
         }
         self.refresh_courses().await
+    }
+
+    async fn courses_cache_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let account = self.current_account.read().await;
+        let config = self.config.read().await;
+        let token_hash = Sha256::digest(config.token.as_bytes());
+        format!("{COURSES_CACHE_KEY}:{account:?}:{}:{token_hash:x}", Self::get_base_url(&config.account_type))
+    }
+
+    pub(super) async fn metadata_cache_key(&self, kind: &str, id: i64) -> String {
+        format!("{}:{kind}:{id}", self.courses_cache_key().await)
     }
 
     pub async fn refresh_courses(&self) -> Result<Vec<Course>> {
@@ -594,7 +649,7 @@ impl App {
             .client
             .list_courses(&self.config.read().await.token)
             .await?;
-        self.cache.set(COURSES_CACHE_KEY, courses.clone())?;
+        self.cache.set_with_ttl(self.courses_cache_key().await, courses.clone(), Duration::from_secs(24 * 60 * 60))?;
         Ok(courses)
     }
 
@@ -677,7 +732,9 @@ impl App {
                 comment,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn delete_submission_comment(
@@ -695,7 +752,9 @@ impl App {
                 comment_id,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn modify_assignment_ddl(
@@ -713,7 +772,9 @@ impl App {
                 lock_at,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn modify_assignment_ddl_override(
@@ -733,7 +794,9 @@ impl App {
                 lock_at,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn delete_assignment_ddl_override(
@@ -749,7 +812,9 @@ impl App {
                 override_id,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn add_assignment_ddl_override(
@@ -771,7 +836,9 @@ impl App {
                 lock_at,
                 &self.config.read().await.token,
             )
-            .await
+            .await?;
+        self.invalidate_cache()?;
+        Ok(())
     }
 
     pub async fn test_token(&self, token: &str) -> Result<User> {
@@ -783,8 +850,12 @@ impl App {
     }
 
     pub async fn list_discussion_topics(&self, course_id: i64) -> Result<Vec<DiscussionTopic>> {
+        let key = self.metadata_cache_key("discussions", course_id).await;
+        if let Some(items) = self.cache.get(&key)? { return Ok(items); }
         let token = self.config.read().await.token.clone();
-        self.client.list_discussion_topics(course_id, &token).await
+        let items = self.client.list_discussion_topics(course_id, &token).await?;
+        self.cache.set_with_ttl(key, items.clone(), Duration::from_secs(5 * 60))?;
+        Ok(items)
     }
 
     pub async fn get_full_discussion(
@@ -856,9 +927,13 @@ impl App {
     }
 
     pub async fn list_course_folders(&self, course_id: i64) -> Result<Vec<Folder>> {
-        self.client
+        let key = self.metadata_cache_key("folders", course_id).await;
+        if let Some(items) = self.cache.get(&key)? { return Ok(items); }
+        let items = self.client
             .list_course_folders(course_id, &self.config.read().await.token)
-            .await
+            .await?;
+        self.cache.set_with_ttl(key, items.clone(), Duration::from_secs(60 * 60))?;
+        Ok(items)
     }
 
     pub async fn list_my_folders(&self) -> Result<Vec<Folder>> {
@@ -1119,6 +1194,9 @@ impl App {
     }
 
     pub async fn save_config(&self, config: AppConfig) -> Result<()> {
+        let previous_config = self.config.read().await.clone();
+        let identity_changed = previous_config.token != config.token || previous_config.account_type != config.account_type;
+        let login_changed = identity_changed || previous_config.ja_auth_cookie != config.ja_auth_cookie;
         if config.proxy_port == 0 {
             return Err(AppError::VideoDownloadError("播放代理端口必须为 1–65535 之间的整数，请前往「设置 → 高级与实验 → 播放代理端口」修改".into()));
         }
@@ -1127,11 +1205,17 @@ impl App {
         crate::diagnostics::protect_config(&config);
         let account = self.current_account.read().await.clone();
         let config_path = App::get_config_path(&account);
-        fs::write(&config_path, serde_json::to_vec(&config).unwrap())?;
+        credentials::save(Path::new(&config_path), &account, &config, &OsCredentialStore)?;
+        let mut config = config;
+        let persisted: AppConfig = serde_json::from_slice(&fs::read(&config_path)?)?;
+        config.credential_ref = persisted.credential_ref;
+        config.credential_chunks = persisted.credential_chunks;
+        config.credential_version = persisted.credential_version;
         let base_url = Self::get_base_url(&config.account_type);
-        if self.client.set_base_url(base_url).await {
+        if self.client.set_base_url(base_url).await || identity_changed {
             self.invalidate_cache()?;
         }
+        if login_changed { self.health.write().await.clear(); }
         Self::apply_llm_config(&config, &self.client).await?;
         self.client.set_debug_mode(config.debug_mode);
         self.client.configure_video_auth(&config.token, &config.ja_auth_cookie, false).await;
@@ -1218,6 +1302,7 @@ impl App {
         self.client
             .submit_assignment(course_id, assignment_id, file_paths, comment, &token)
             .await?;
+        self.invalidate_cache()?;
         Ok(())
     }
 
@@ -1698,7 +1783,7 @@ mod live_proxy_tests {
             client: Arc::new(Client::new_without_proxy("http://127.0.0.1", "", "", "", None)),
             current_account: Default::default(),
             config: RwLock::new(AppConfig { proxy_port: port, ..Default::default() }),
-            handle: Default::default(), mcp_handle: Default::default(), cache: Default::default(),
+            handle: Default::default(), mcp_handle: Default::default(), cache: Default::default(), health: Default::default(),
             attendance_handle: Default::default(), attendance_status: Default::default(),
         }
     }
@@ -1772,7 +1857,7 @@ mod live_proxy_tests {
             current_account: Default::default(), config: Default::default(),
             handle: Default::default(), mcp_handle: Default::default(),
             attendance_handle: Default::default(), attendance_status: Default::default(),
-            cache: Default::default(),
+            cache: Default::default(), health: Default::default(),
         };
         app.config.write().await.proxy_port = port;
         let (live, recording) = tokio::join!(app.prepare_proxy(), app.prepare_proxy());

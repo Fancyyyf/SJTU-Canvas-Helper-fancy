@@ -70,7 +70,7 @@ function TypingDots() {
   );
 }
 
-function ChatBubble(message: CanvasAgentChatMessage) {
+function ChatBubble(message: CanvasAgentChatMessage & { agentName: string }) {
   const theme = useTheme();
   const mine = message.role === "user";
 
@@ -105,7 +105,7 @@ function ChatBubble(message: CanvasAgentChatMessage) {
       >
         <Stack direction="row" justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-            {mine ? "你" : "Canvas Agent"}
+            {mine ? "你" : message.agentName}
           </Typography>
           <Stack direction="row" spacing={0.75} alignItems="center">
             {message.pending ? (
@@ -168,10 +168,16 @@ const SUGGESTIONS = [
   "帮我看看本周的日程和作业截止时间。",
 ];
 
+const PI_SUGGESTIONS = [
+  "帮我整理本周日历与 TODO，按时间先后列出重点。",
+  "最近有哪些待办快到截止时间？",
+  "结合我的日程，建议今天先处理哪些任务？",
+];
+
 export default function CanvasAgentPage() {
   const theme = useTheme();
   const courses = useCourses();
-  const { messages, input, maxTurns, maxTokens, loading } = useAISession(canvasAgentSession);
+  const { messages, input, maxTurns, maxTokens, loading, engine } = useAISession(canvasAgentSession);
   const setInput = (input: string) => canvasAgentSession.update({ input });
   const setMaxTurns = (maxTurns: string) => canvasAgentSession.update({ maxTurns });
   const setMaxTokens = (maxTokens: string) => canvasAgentSession.update({ maxTokens });
@@ -222,7 +228,7 @@ export default function CanvasAgentPage() {
           chipLabel="智能助手"
           chipIcon={<AutoAwesomeRoundedIcon />}
           title="Canvas 智能聊天工作台"
-          description="用自然语言查看课程与作业，也可以查询、创建、修改或删除保存在本机的个人日程。"
+          description={engine === "pi" ? "使用 Pi Agent 连续对话，查看本地日历与 TODO。" : "用自然语言查看课程与作业，也可以查询、创建、修改或删除保存在本机的个人日程。"}
           aside={
             <Stack spacing={1} alignItems={{ xs: "flex-start", md: "flex-end" }}>
               <Chip
@@ -231,7 +237,7 @@ export default function CanvasAgentPage() {
                 variant="outlined"
               />
               <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 320 }}>
-                可以问“最近要交什么”“这门课文件在哪”，也可以说“帮我在周五下午三点安排一小时复习”。
+                {engine === "pi" ? "可以追问日程与待办。Pi 使用设置中当前选中的模型和 API Key。" : "可以问“最近要交什么”“这门课文件在哪”，也可以说“帮我在周五下午三点安排一小时复习”。"}
               </Typography>
             </Stack>
           }
@@ -264,12 +270,20 @@ export default function CanvasAgentPage() {
                         Agent 配置
                       </Typography>
                       <Typography variant="body2" color="text.secondary">
-                        调整回答时可用的内部检索轮次和输出长度。
+                        {engine === "pi" ? "在下方窗口与 Pi 连续对话。" : "调整回答时可用的内部检索轮次和输出长度。"}
                       </Typography>
                     </Box>
 
                     <Stack spacing={1.25}>
-                      <TextField
+                      <TextField select label="Agent 引擎" value={engine}
+                        onChange={(event) => canvasAgentSession.selectEngine(event.target.value as "rig" | "pi")}
+                        disabled={loading || changingAccount} size="small"
+                        SelectProps={{ native: true }}
+                        helperText={engine === "pi" ? "沿用设置中当前选中的 API Key、接口和模型；保留连续对话。需本机安装 pi，仅读取日历与 TODO。" : "内置 Agent 可调用 Canvas 工具。"}>
+                        <option value="rig">自配 Agent（内置）</option>
+                        <option value="pi">Pi Agent</option>
+                      </TextField>
+                      {engine === "rig" && <><TextField
                         label="最大轮次"
                         value={maxTurns}
                         onChange={(event) => setMaxTurns(event.target.value)}
@@ -288,7 +302,7 @@ export default function CanvasAgentPage() {
                         type="number"
                         inputProps={{ min: MIN_MAX_TOKENS, max: MAX_MAX_TOKENS, step: 256 }}
                         helperText="值越大，回复通常越长，但耗时和消耗也会更高。"
-                      />
+                      /></>}
                     </Stack>
                   </Stack>
                 </Box>
@@ -303,7 +317,7 @@ export default function CanvasAgentPage() {
                 </Box>
 
                 <Stack spacing={1.25}>
-                  {SUGGESTIONS.map((suggestion) => (
+                  {(engine === "pi" ? PI_SUGGESTIONS : SUGGESTIONS).map((suggestion) => (
                     <Button
                       key={suggestion}
                       variant="outlined"
@@ -346,12 +360,15 @@ export default function CanvasAgentPage() {
               >
                 <Stack
                   direction="row"
-                  justifyContent="flex-end"
+                  justifyContent="space-between"
                   alignItems="center"
                 >
+                  <Button size="small" onClick={canvasAgentSession.newConversation} disabled={loading || changingAccount}>
+                    新建对话
+                  </Button>
                   <Chip
                     icon={<SmartToyRoundedIcon />}
-                    label={loading ? "处理中" : "智能助手在线"}
+                    label={loading ? "处理中" : engine === "pi" ? "Pi Agent" : "内置 Agent"}
                     color={loading ? "warning" : "primary"}
                     variant="outlined"
                   />
@@ -376,7 +393,7 @@ export default function CanvasAgentPage() {
                 {messages.length > 0 ? (
                   <Stack spacing={2.2}>
                     {messages.map((message) => (
-                      <ChatBubble key={message.id} {...message} />
+                      <ChatBubble key={message.id} {...message} agentName={engine === "pi" ? "Pi Agent" : "Canvas Agent"} />
                     ))}
                   </Stack>
                 ) : (
@@ -388,10 +405,10 @@ export default function CanvasAgentPage() {
                   >
                     <SmartToyRoundedIcon sx={{ fontSize: 42, color: "text.secondary" }} />
                     <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                      开始和 Canvas Agent 对话
+                      开始和 {engine === "pi" ? "Pi Agent" : "Canvas Agent"} 对话
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 520 }}>
-                      例如：帮我列出最近一周截止的作业；或者先列出课程，再深入问某一门课的文件、讨论区、提交情况。
+                      {engine === "pi" ? "Pi 会记住当前对话。可询问日历与 TODO，并继续追问。" : "例如：帮我列出最近一周截止的作业；或者先列出课程，再深入问某一门课的文件、讨论区、提交情况。"}
                     </Typography>
                   </Stack>
                 )}
@@ -405,14 +422,14 @@ export default function CanvasAgentPage() {
                     maxRows={8}
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
-                    placeholder="直接描述你的需求，例如：帮我找出最近截止的作业，并告诉我每门课各有几个。"
+                    placeholder={engine === "pi" ? "向 Pi 提问日程与待办，可以继续追问。" : "直接描述你的需求，例如：帮我找出最近截止的作业，并告诉我每门课各有几个。"}
                     disabled={loading || changingAccount}
                   />
                   <Stack direction="row" justifyContent="space-between" alignItems="center">
                     <Typography variant="caption" color="text.secondary">
                       {loading
-                        ? "正在整理相关课程信息并生成回复。"
-                        : "建议尽量描述清楚你的需求，比如课程范围、时间范围或想看的内容。"}
+                        ? "正在生成回复。"
+                        : engine === "pi" ? "Pi 可读取日历与 TODO 快照，对话会保留在本机。" : "建议尽量描述清楚你的需求，比如课程范围、时间范围或想看的内容。"}
                     </Typography>
                     <Button
                       variant="contained"

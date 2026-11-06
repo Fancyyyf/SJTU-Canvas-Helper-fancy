@@ -19,8 +19,9 @@ export async function getConfig(revalidate = false) {
 // TODO: change it to redux
 export async function saveConfig(config: AppConfig) {
   await invoke("save_config", { config });
-  CONFIG = config;
+  CONFIG = (await invoke("get_config")) as AppConfig;
   configStore.dispatch(updateConfig(cloneDeep(CONFIG)));
+  return CONFIG;
 }
 
 export async function listNetworkLogs() {

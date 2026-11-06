@@ -14,6 +14,23 @@ vi.mock("../layout", () => ({ default: ({ children }: { children: ReactNode }) =
 beforeEach(() => { canvasAgentSession.reset(); vi.clearAllMocks(); });
 afterEach(cleanup);
 
+it("keeps Pi and built-in agent conversations separate", () => {
+  const rigMessage = { id: "rig", role: "user" as const, content: "rig", createdAt: "2026-11-05" };
+  const piMessage = { id: "pi", role: "user" as const, content: "pi", createdAt: "2026-11-05" };
+  canvasAgentSession.update({ messages: [rigMessage], rigMessages: [rigMessage] });
+  canvasAgentSession.selectEngine("pi");
+  expect(canvasAgentSession.getSnapshot().messages).toEqual([]);
+  canvasAgentSession.update({ messages: [piMessage], piMessages: [piMessage] });
+  const oldConversation = canvasAgentSession.getSnapshot().piConversationId;
+  canvasAgentSession.selectEngine("rig");
+  expect(canvasAgentSession.getSnapshot().messages).toEqual([rigMessage]);
+  canvasAgentSession.selectEngine("pi");
+  expect(canvasAgentSession.getSnapshot().messages).toEqual([piMessage]);
+  canvasAgentSession.newConversation();
+  expect(canvasAgentSession.getSnapshot().messages).toEqual([]);
+  expect(canvasAgentSession.getSnapshot().piConversationId).not.toBe(oldConversation);
+});
+
 it("does not force readers back to the bottom when a reply updates", () => {
   const scrollTo = vi.fn();
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollTo });

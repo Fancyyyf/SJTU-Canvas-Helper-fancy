@@ -275,6 +275,7 @@ export default function SettingsPage() {
   const [rawConfig, setRawConfig] = useState<string>("");
   const [rawConfigLoading, setRawConfigLoading] = useState(false);
   const [rawConfigError, setRawConfigError] = useState("");
+  const [credentialStatus, setCredentialStatus] = useState<{ state: string; message: string } | null>(null);
   const [testingToken, setTestingToken] = useState(false);
   const [tokenTestResult, setTokenTestResult] = useState<{ severity: "success" | "error"; text: string } | null>(null);
   const [showLogModal, setShowLogModal] = useState<boolean>(false);
@@ -501,6 +502,8 @@ export default function SettingsPage() {
         invoke<SystemSettings>("get_system_settings").catch(() => null),
       ]);
       const accountInfo = (await invoke("read_account_info")) as AccountInfo;
+      const status = await invoke<{ state: string; message: string }>("credential_status");
+      setCredentialStatus(status);
       const normalizedConfig = normalizeLlmConfigForSettings({
         ...config,
         theme: config.theme ?? "light",
@@ -530,7 +533,7 @@ export default function SettingsPage() {
       setTokenError("");
       setTokenTestResult(null);
       setSavePathError("");
-      if (normalizedConfig.token.length === 0) {
+      if (normalizedConfig.token.length === 0 && status?.state === "ready") {
         setOpenTour(true);
         setTourStep(0);
       }
@@ -644,8 +647,11 @@ export default function SettingsPage() {
     }
 
     try {
-      await saveConfig(formData);
-      setInitialSnapshot(JSON.stringify(formData));
+      const saved = await saveConfig(formData);
+      const updated = { ...formData, credential_ref: saved.credential_ref,
+        credential_chunks: saved.credential_chunks, credential_version: saved.credential_version };
+      setFormData(updated);
+      setInitialSnapshot(JSON.stringify(updated));
       if (systemSettings && systemSettingsDirty) {
         await invoke("save_system_settings", { settings: systemSettings });
         setInitialSystemSettings(JSON.stringify(systemSettings));
@@ -948,6 +954,21 @@ export default function SettingsPage() {
                         获取 Canvas Token
                       </Button>
                     </Stack>
+                    {credentialStatus && credentialStatus.state !== "ready" && (
+                      <Alert severity="warning" action={<Stack direction="row" spacing={1}>
+                        <Button color="inherit" size="small" onClick={async () => {
+                          try { await invoke("retry_credential_load"); await initConfig(); }
+                          catch (error) { messageApi.error(`凭据读取失败：${error}`); }
+                        }}>重试读取</Button>
+                        {credentialStatus.state === "missing" && <Button color="inherit" size="small" onClick={async () => {
+                          if (!window.confirm("确认清除当前账号的凭据引用？之后需要重新登录，原系统凭据条目不会被删除。")) return;
+                          try { await invoke("forget_credentials"); await initConfig(); }
+                          catch (error) { messageApi.error(`清除凭据引用失败：${error}`); }
+                        }}>重新登录</Button>}
+                      </Stack>}>
+                        {credentialStatus.message}。如系统凭据库暂时不可用，请恢复后重试；迁移失败时原账号文件会保留。
+                      </Alert>
+                    )}
                     <Box
                       sx={{
                         display: "grid",
@@ -1821,7 +1842,7 @@ export default function SettingsPage() {
                             }}>复制配置</Button>
                         </Stack>
                         <Typography variant="caption" color="text.secondary">
-                          粘贴到 opencode / Claude Desktop / Cline 等支持 MCP 的 AI 客户端即可自动接入。MCP 服务器仅监听本机，无需额外鉴权。
+                          粘贴到 opencode / Claude Desktop / Cline 等支持 MCP 的 AI 客户端即可接入。服务器仅监听本机，限制远程 Host 与网页 Origin，但当前不验证本机进程身份；仅在可信设备上启用，不要转发端口。
                         </Typography>
                         <TextField size="small"
                           label="MCP 连接配置"
@@ -1924,7 +1945,7 @@ export default function SettingsPage() {
                     <Box>
                       <Typography variant="h5">配置预览</Typography>
                       <Typography variant="body2" color="text.secondary">
-                        查看最终写入的原始配置，适合排查异常或确认字段结构。
+                        查看已脱敏的磁盘配置结构；Token、Cookie 与 API Key 不会显示。
                       </Typography>
                     </Box>
 

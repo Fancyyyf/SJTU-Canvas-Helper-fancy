@@ -38,7 +38,12 @@ try {
       "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relativePath
     }
   Set-Content -LiteralPath (Join-Path $outputDir "SHA256SUMS.txt") -Value $checksums -Encoding ascii
+  $releaseDir = Join-Path $repoRoot "release"
+  New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+  $releaseExe = Join-Path $releaseDir "SJTU Canvas Helper.exe"
+  Copy-Item -LiteralPath $outputExe -Destination $releaseExe -Force
   Write-Host "Local preview executable: $outputExe"
+  Write-Host "Synced release executable: $releaseExe"
 }
 finally {
   Pop-Location

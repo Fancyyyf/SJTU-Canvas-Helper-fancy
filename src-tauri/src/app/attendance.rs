@@ -140,6 +140,16 @@ async fn resolve_python_environment(preferred: &str) -> Result<(PythonInvocation
     }
 }
 
+async fn resolve_python_read_environment(preferred: &str) -> Result<PythonInvocation> {
+    for candidate in python_candidates(preferred) {
+        let output = command_for(&candidate).arg("-c").arg("import requests").output().await;
+        if output.is_ok_and(|output| output.status.success()) {
+            return Ok(candidate);
+        }
+    }
+    Err(attendance_error("签到查询需要 Python 3 和 requests；请在签到守望页配置解释器"))
+}
+
 fn python_module_dir(window: &Window) -> Result<PathBuf> {
     let development_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../python/attendance");
     if development_path.join("nn.py").is_file() {
@@ -365,6 +375,43 @@ impl App {
             "Python 签到模块没有返回有效结果。{}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
+    }
+
+    pub async fn read_course_attendance(
+        &self,
+        window: &Window,
+        course_id: i64,
+        kind: &str,
+        page_num: u32,
+        page_size: u32,
+    ) -> Result<Value> {
+        if course_id <= 0 || !matches!(kind, "status" | "records") || page_num == 0 || page_num > 1000 || page_size == 0 || page_size > 100 {
+            return Err(attendance_error("签到查询参数无效"));
+        }
+        let config = self.config.read().await.clone();
+        if config.ja_auth_cookie.trim().is_empty() {
+            return Err(attendance_error("请先在系统设置完成额外扫码登录"));
+        }
+        let python = resolve_python_read_environment(&config.attendance_python_command).await?;
+        let script = python_module_dir(window)?.join("surveil.py");
+        let mut command = command_for(&python);
+        command.arg("-u").arg(script)
+            .arg("--attendance-read").arg(kind)
+            .arg("--course-id").arg(course_id.to_string())
+            .arg("--page-num").arg(page_num.to_string())
+            .arg("--page-size").arg(page_size.to_string());
+        command.env("SJTU_ATTENDANCE_JA_AUTH_COOKIE", &config.ja_auth_cookie);
+        let output = command.output().await?;
+        let result = parse_json_lines(&output.stdout).into_iter()
+            .find(|value| value.get("kind").and_then(Value::as_str) == Some("attendance-read"))
+            .ok_or_else(|| attendance_error("签到查询没有返回有效 JSON"))?;
+        if let Some(message) = result.get("error").and_then(Value::as_str) {
+            return Err(attendance_error(message));
+        }
+        if !output.status.success() {
+            return Err(attendance_error("签到查询失败，请查看本地错误日志"));
+        }
+        Ok(result)
     }
 
     pub async fn get_attendance_watch_status(&self) -> AttendanceWatchStatus {

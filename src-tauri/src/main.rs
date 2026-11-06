@@ -510,6 +510,16 @@ async fn sign_attendance_url(window: Window, url: String) -> Result<AttendanceSi
 }
 
 #[tauri::command]
+async fn read_course_attendance(window: Window, course_id: i64, kind: String, page_num: u32, page_size: u32) -> Result<serde_json::Value> {
+    APP.read_course_attendance(&window, course_id, &kind, page_num, page_size).await
+}
+
+#[tauri::command]
+async fn check_service_health(window: Window, course_id: Option<i64>) -> app::health::HealthReport {
+    APP.check_service_health(&window, course_id).await
+}
+
+#[tauri::command]
 async fn scan_course_qrcodes(course_id: i64) -> Result<QRCodeScanReport> {
     APP.scan_course_qrcodes(course_id).await
 }
@@ -563,6 +573,21 @@ async fn clear_network_logs() {
 #[tauri::command]
 async fn get_raw_config() -> Result<String> {
     APP.get_raw_config().await
+}
+
+#[tauri::command]
+async fn credential_status() -> serde_json::Value {
+    APP.credential_status().await
+}
+
+#[tauri::command]
+async fn retry_credential_load() -> Result<()> {
+    APP.retry_credential_load().await
+}
+
+#[tauri::command]
+async fn forget_credentials() -> Result<()> {
+    APP.forget_credentials().await
 }
 
 #[tauri::command]
@@ -1306,6 +1331,22 @@ fn save_system_settings(app: tauri::AppHandle, settings: SystemSettings) -> Resu
     Ok(())
 }
 
+#[tauri::command]
+async fn fetch_timetable(year: i32, term: u8) -> Result<app::timetable::TimetableResult> {
+    APP.fetch_timetable(year, term).await
+}
+
+#[tauri::command]
+async fn search_web(query: String, api_key: String) -> Result<Vec<app::web_search::WebSearchItem>> {
+    app::web_search::search_web(&query, &api_key).await
+}
+
+#[tauri::command]
+async fn pi_agent_chat(messages: Vec<LLMChatMessage>, context: String, account: String, conversation_id: String) -> Result<String> {
+    personal_calendar::checked_account(&account)?;
+    app::pi_agent::chat_with_pi(&messages, &context, &account, &conversation_id).await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_directory = App::config_dir().map(std::path::PathBuf::from)
@@ -1333,7 +1374,11 @@ async fn main() -> Result<()> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
+            fetch_timetable,
+            search_web,
+            pi_agent_chat,
             release_update::check_release_update,
             release_update::install_release_update,
             get_video_subtitle_versions,
@@ -1377,6 +1422,8 @@ async fn main() -> Result<()> {
             check_attendance_python,
             scan_attendance_once,
             sign_attendance_url,
+            read_course_attendance,
+            check_service_health,
             scan_course_qrcodes,
             get_single_course_assignment_submission,
             export_excel,
@@ -1395,6 +1442,9 @@ async fn main() -> Result<()> {
             list_network_logs,
             clear_network_logs,
             get_raw_config,
+            credential_status,
+            retry_credential_load,
+            forget_credentials,
             save_config,
             save_file_content,
             open_course_file,

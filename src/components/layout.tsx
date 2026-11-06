@@ -20,6 +20,7 @@ import ClosedCaptionRoundedIcon from "@mui/icons-material/ClosedCaptionRounded";
 import TimelineRoundedIcon from "@mui/icons-material/TimelineRounded";
 import DeveloperBoardRoundedIcon from "@mui/icons-material/DeveloperBoardRounded";
 import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
+import MenuBookRoundedIcon from "@mui/icons-material/MenuBookRounded";
 import DashboardCustomizeRoundedIcon from "@mui/icons-material/DashboardCustomizeRounded";
 import {
   Box,
@@ -70,12 +71,15 @@ type SidebarDrag = { key: string; x: number; y: number; target?: string; after?:
 
 const navigationItems = [
   { key: "home", label: "首页", icon: <HomeRoundedIcon />, path: "/home" },
+  { key: "guide", label: "使用教程", icon: <MenuBookRoundedIcon />, path: "/guide" },
   { key: "agent", label: "Canvas Agent", icon: <PsychologyRoundedIcon />, path: "/agent" },
   { key: "attendance", label: "签到守望", icon: <HowToRegRoundedIcon />, path: "/attendance" },
   { key: "files", label: "文件管理", icon: <ArticleRoundedIcon />, path: "/files" },
   { key: "assignments", label: "作业列表", icon: <AssignmentRoundedIcon />, path: "/assignments" },
   { key: "discussions", label: "讨论管理", icon: <ForumRoundedIcon />, path: "/discussions" },
   { key: "calendar", label: "日程管理", icon: <CalendarMonthRoundedIcon />, path: "/calendar" },
+  { key: "todo", label: "TODO 与提醒", icon: <AssignmentRoundedIcon />, path: "/todo" },
+  { key: "web-search", label: "网页搜索", icon: <ForumRoundedIcon />, path: "/web-search" },
   { key: "users", label: "成员导出", icon: <GroupsRoundedIcon />, path: "/users" },
   { key: "grades", label: "成绩管理", icon: <FactCheckRoundedIcon />, path: "/grades" },
   { key: "submissions", label: "提交批改", icon: <CloudDownloadRoundedIcon />, path: "/submissions" },
@@ -89,12 +93,15 @@ const navigationItems = [
 
 const pageTitleMap: Record<string, string> = {
   home: "首页",
+  guide: "使用教程",
   agent: "Canvas Agent",
   attendance: "签到守望",
   files: "文件管理",
   assignments: "作业列表",
   discussions: "讨论管理",
   calendar: "日程管理",
+  todo: "TODO 与提醒",
+  "web-search": "网页搜索",
   users: "成员导出",
   grades: "成绩管理",
   submissions: "提交批改",
